@@ -1,95 +1,545 @@
 import pandas as pd
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OrdinalEncoder
-from sklearn.ensemble import HistGradientBoostingClassifier
-from sklearn.metrics import accuracy_score, roc_auc_score
+import numpy as np
 
-# Load data
-df = pd.read_csv("train.csv")
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    ExtraTreesClassifier,
+    RandomForestClassifier
+)
+
+from sklearn.metrics import (
+    roc_auc_score,
+    accuracy_score
+)
+
+
+# ============================================================
+# 1. LOAD DATA
+# ============================================================
+
+print("=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train = pd.read_csv("train.csv")
 test = pd.read_csv("test.csv")
 
-print(df.head())
-print(df.shape)
-print(df.dtypes)
-print(df["Will_Buy_EV"].value_counts())
-
-print(f"\nDataset Information:")
-df.info()
-
-print(f"\nMissing Values:")
-print(df.isnull().sum())
-
-print(f"\nDataset Summary:")
-print(df.describe())
+print("Train shape:", train.shape)
+print("Test shape :", test.shape)
 
 
-# Target
-y = df["Will_Buy_EV"].map({"Yes": 1, "No": 0})
+# ============================================================
+# 2. BASIC DATA INSPECTION
+# ============================================================
 
-# Features
-X = df.drop(columns=["Will_Buy_EV", "id"])
-X_test = test.drop(columns=["id"])
+print("\nFirst 5 rows:")
+print(train.head())
 
-# Split the training data
-X_train, X_valid, y_train, y_valid = train_test_split(
-    X, y,
-    test_size=0.2,
-    random_state=42,
-    stratify=y
-)
+print("\nData types:")
+print(train.dtypes)
 
-# Convert text columns to numbers
-cat_cols = X.select_dtypes(include="object").columns
+print("\nTarget distribution:")
+print(train["Will_Buy_EV"].value_counts())
 
-encoder = OrdinalEncoder(
-    handle_unknown="use_encoded_value",
-    unknown_value=-1
-)
+print("\nTarget percentage:")
+print(train["Will_Buy_EV"].value_counts(normalize=True))
 
-X_train[cat_cols] = encoder.fit_transform(X_train[cat_cols])
-X_valid[cat_cols] = encoder.transform(X_valid[cat_cols])
+print("\nMissing values:")
+print(train.isnull().sum())
 
+print("\nDataset information:")
+train.info()
+
+print("\nNumerical summary:")
+print(train.describe())
 
 
+# ============================================================
+# 3. TARGET
+# ============================================================
 
-# Create model
-model = HistGradientBoostingClassifier(
-    learning_rate=0.08,
-    max_iter=300,
+y = train["Will_Buy_EV"].map({
+    "Yes": 1,
+    "No": 0
+})
+
+if y.isnull().any():
+    raise ValueError(
+        "Target contains values other than 'Yes' and 'No'."
+    )
+
+
+# ============================================================
+# 4. FEATURES
+# ============================================================
+
+X = train.drop(
+    columns=["Will_Buy_EV", "id"],
+    errors="ignore"
+).copy()
+
+X_test = test.drop(
+    columns=["id"],
+    errors="ignore"
+).copy()
+
+
+# Make sure train and test contain the same features
+missing_in_test = set(X.columns) - set(X_test.columns)
+
+extra_in_test = set(X_test.columns) - set(X.columns)
+
+if missing_in_test:
+    raise ValueError(
+        f"Columns missing from test data: {missing_in_test}"
+    )
+
+if extra_in_test:
+    print(
+        "\nDropping extra test columns:",
+        extra_in_test
+    )
+
+    X_test = X_test.drop(
+        columns=list(extra_in_test)
+    )
+
+
+# Same column order
+X_test = X_test[X.columns]
+
+
+# ============================================================
+# 5. IDENTIFY COLUMN TYPES
+# ============================================================
+
+numeric_cols = X.select_dtypes(
+    include=["int64", "int32", "float64", "float32"]
+).columns.tolist()
+
+categorical_cols = X.select_dtypes(
+    include=["object", "string", "category", "bool"]
+).columns.tolist()
+
+print("\nNumeric columns:")
+print(numeric_cols)
+
+print("\nCategorical columns:")
+print(categorical_cols)
+
+
+# ============================================================
+# 6. PREPROCESSING
+# ============================================================
+
+numeric_pipeline = Pipeline([
+    (
+        "imputer",
+        SimpleImputer(strategy="median")
+    )
+])
+
+categorical_pipeline = Pipeline([
+    (
+        "imputer",
+        SimpleImputer(strategy="most_frequent")
+    ),
+
+    (
+        "encoder",
+        OrdinalEncoder(
+            handle_unknown="use_encoded_value",
+            unknown_value=-1
+        )
+    )
+])
+
+
+preprocessor = ColumnTransformer([
+    (
+        "numeric",
+        numeric_pipeline,
+        numeric_cols
+    ),
+
+    (
+        "categorical",
+        categorical_pipeline,
+        categorical_cols
+    )
+])
+
+
+# ============================================================
+# 7. MODELS
+# ============================================================
+
+models = {
+
+    "HistGradientBoosting": HistGradientBoostingClassifier(
+        learning_rate=0.05,
+        max_iter=500,
+        max_leaf_nodes=31,
+        min_samples_leaf=20,
+        l2_regularization=1.0,
+        random_state=42
+    ),
+
+    "ExtraTrees": ExtraTreesClassifier(
+        n_estimators=500,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    ),
+
+    "RandomForest": RandomForestClassifier(
+        n_estimators=500,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    )
+}
+
+
+# ============================================================
+# 8. 5-FOLD STRATIFIED CROSS-VALIDATION
+# ============================================================
+
+skf = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
     random_state=42
 )
 
-# Train
-model.fit(X_train, y_train)
+results = {}
 
-# Validation prediction
-pred = model.predict_proba(X_valid)[:, 1]
+test_predictions = {}
 
-print("ROC-AUC:", roc_auc_score(y_valid, pred))
-print("Accuracy:", accuracy_score(y_valid, pred >= 0.5))
+oof_predictions_all = {}
 
-#Encode full training and test data
-encoder = OrdinalEncoder(
-    handle_unknown="use_encoded_value",
-    unknown_value=-1
+
+for model_name, classifier in models.items():
+
+    print("\n")
+    print("=" * 70)
+    print(f"MODEL: {model_name}")
+    print("=" * 70)
+
+    oof_predictions = np.zeros(len(X))
+    
+    test_predictions_model = np.zeros(len(X_test))
+    
+    fold_scores = []
+
+    for fold, (train_idx, valid_idx) in enumerate(
+        skf.split(X, y),
+        start=1
+    ):
+
+        print(f"\nTraining Fold {fold}/5...")
+
+        X_train = X.iloc[train_idx]
+        X_valid = X.iloc[valid_idx]
+
+        y_train = y.iloc[train_idx]
+        y_valid = y.iloc[valid_idx]
+
+
+    # Create complete pipeline
+        pipeline = Pipeline([
+            (
+                "preprocessor",
+                preprocessor
+            ),
+
+            (
+                "model",
+                classifier
+            )
+        ])
+
+    
+
+
+        # Train
+        pipeline.fit(
+            X_train,
+            y_train
+        )
+
+
+        # Validation predictions
+        valid_pred = pipeline.predict_proba(
+            X_valid
+        )[:, 1]
+
+
+        # Test predictions
+        fold_test_pred = pipeline.predict_proba(
+            X_test
+        )[:, 1]
+
+
+        # Store out-of-fold predictions
+        oof_predictions[valid_idx] = valid_pred
+
+
+        # Average test predictions
+        test_predictions_model += (
+            fold_test_pred / skf.n_splits
+        )
+
+
+        # Fold ROC-AUC
+        fold_auc = roc_auc_score(
+            y_valid,
+            valid_pred
+        )
+
+        fold_scores.append(fold_auc)
+
+        print(
+            f"Fold {fold} ROC-AUC: "
+            f"{fold_auc:.6f}"
+        )
+
+
+    # ========================================================
+    # OVERALL OOF PERFORMANCE
+    # ========================================================
+
+    overall_auc = roc_auc_score(
+        y,
+        oof_predictions
+    )
+
+    accuracy = accuracy_score(
+        y,
+        (oof_predictions >= 0.5).astype(int)
+    )
+
+
+    results[model_name] = {
+        "auc": overall_auc,
+        "accuracy": accuracy,
+        "fold_scores": fold_scores
+    }
+
+
+    test_predictions[model_name] = (
+        test_predictions_model
+    )
+
+    oof_predictions_all[model_name] = (
+        oof_predictions
+    )
+
+
+    print("\nOverall ROC-AUC:")
+    print(f"{overall_auc:.6f}")
+
+    print("\nAccuracy @ 0.50:")
+    print(f"{accuracy:.6f}")
+
+
+# ============================================================
+# 9. MODEL COMPARISON
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("MODEL COMPARISON")
+print("=" * 70)
+
+for model_name, result in results.items():
+
+    print(
+        f"{model_name:25s} "
+        f"ROC-AUC = {result['auc']:.6f} | "
+        f"Accuracy = {result['accuracy']:.6f}"
+    )
+
+
+# ============================================================
+# 10. SELECT BEST MODEL
+# ============================================================
+
+best_model_name = max(
+    results,
+    key=lambda name: results[name]["auc"]
 )
 
-X[cat_cols] = encoder.fit_transform(X[cat_cols])
-X_test[cat_cols] = encoder.transform(X_test[cat_cols])
+print("\nBest model:")
+print(best_model_name)
 
-# Train on all data
+best_oof = oof_predictions_all[
+    best_model_name
+]
 
-model.fit(X, y)
+best_test_pred = test_predictions[
+    best_model_name
+]
 
-# Predict test data
-test_pred = model.predict_proba(X_test)[:, 1]
 
-# Create submission
+# ============================================================
+# 11. OPTIMIZE ACCURACY THRESHOLD
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("THRESHOLD SEARCH")
+print("=" * 70)
+
+best_threshold = 0.50
+best_accuracy = 0
+
+for threshold in np.arange(
+    0.10,
+    0.91,
+    0.01
+):
+
+    predictions = (
+        best_oof >= threshold
+    ).astype(int)
+
+    acc = accuracy_score(
+        y,
+        predictions
+    )
+
+    if acc > best_accuracy:
+        best_accuracy = acc
+        best_threshold = threshold
+
+
+print(
+    f"Best threshold: "
+    f"{best_threshold:.2f}"
+)
+
+print(
+    f"Best OOF accuracy: "
+    f"{best_accuracy:.6f}"
+)
+
+
+# ============================================================
+# 12. FINAL MODEL
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("TRAINING FINAL MODEL")
+print("=" * 70)
+
+final_classifier = models[
+    best_model_name
+]
+
+final_pipeline = Pipeline([
+    (
+        "preprocessor",
+        preprocessor
+    ),
+
+    (
+        "model",
+        final_classifier
+    )
+])
+
+
+# Train on ALL available training data
+final_pipeline.fit(
+    X,
+    y
+)
+
+
+# ============================================================
+# 13. FINAL TEST PREDICTIONS
+# ============================================================
+
+final_test_pred = final_pipeline.predict_proba(
+    X_test
+)[:, 1]
+
+
+# ============================================================
+# 14. CREATE SUBMISSION
+# ============================================================
+
 submission = pd.DataFrame({
     "id": test["id"],
-    "Will_Buy_EV": test_pred
+    "Will_Buy_EV": final_test_pred
 })
 
-submission.to_csv("submission.csv", index=False)
 
-print("Submission saved!")
+submission.to_csv(
+    "submission.csv",
+    index=False
+)
+
+
+# ============================================================
+# 15. FINAL RESULTS
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("FINAL RESULTS")
+print("=" * 70)
+
+print(
+    "Original baseline ROC-AUC : 0.940597"
+)
+
+print(
+    f"Best CV ROC-AUC           : "
+    f"{results[best_model_name]['auc']:.6f}"
+)
+
+print(
+    f"Best model                : "
+    f"{best_model_name}"
+)
+
+print(
+    f"Best accuracy threshold   : "
+    f"{best_threshold:.2f}"
+)
+
+print(
+    f"Best OOF accuracy         : "
+    f"{best_accuracy:.6f}"
+)
+
+print(
+    "\nSubmission saved as:"
+)
+
+print(
+    "submission.csv"
+)
+
+
+# ============================================================
+# 16. PREVIEW SUBMISSION
+# ============================================================
+
+print("\nSubmission preview:")
+
+print(
+    submission.head(10)
+)
