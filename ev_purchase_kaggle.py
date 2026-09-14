@@ -543,3 +543,430 @@ print("\nSubmission preview:")
 print(
     submission.head(10)
 )
+
+# ============================================================
+# TARGET RATE ANALYSIS
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("TARGET RATE ANALYSIS")
+print("=" * 70)
+
+analysis_df = train.copy()
+
+analysis_df["target"] = (
+    analysis_df["Will_Buy_EV"] == "Yes"
+).astype(int)
+
+
+# ------------------------------------------------------------
+# CATEGORICAL FEATURES
+# ------------------------------------------------------------
+
+categorical_analysis_cols = [
+    "Gender",
+    "City_Type",
+    "Current_Car_Type",
+    "Home_Charging_Possible",
+    "Subsidy_Available",
+    "Range_Anxiety_Level"
+]
+
+for col in categorical_analysis_cols:
+
+    print("\n" + "-" * 70)
+    print(f"{col}")
+    print("-" * 70)
+
+    result = (
+        analysis_df
+        .groupby(col)["target"]
+        .agg(["mean", "count"])
+        .sort_values("mean", ascending=False)
+    )
+
+    result["purchase_rate_%"] = result["mean"] * 100
+
+    print(result)
+
+
+# ------------------------------------------------------------
+# NUMERICAL FEATURES
+# ------------------------------------------------------------
+
+numeric_analysis_cols = [
+    "Age",
+    "Annual_Income_USD",
+    "Daily_Commute_km",
+    "Number_of_Cars_Owned",
+    "Charging_Stations_Near_Home",
+    "Charging_Stations_Near_Work",
+    "Environmental_Concern_Level"
+]
+
+for col in numeric_analysis_cols:
+
+    print("\n" + "-" * 70)
+    print(f"{col}")
+    print("-" * 70)
+
+    analysis_df["bin"] = pd.qcut(
+        analysis_df[col],
+        q=10,
+        duplicates="drop"
+    )
+
+    result = (
+        analysis_df
+        .groupby("bin", observed=True)["target"]
+        .agg(["mean", "count"])
+    )
+
+    result["purchase_rate_%"] = result["mean"] * 100
+
+    print(result)
+
+
+# Cleanup
+analysis_df.drop(
+    columns=["target", "bin"],
+    inplace=True,
+    errors="ignore"
+)
+
+
+# ============================================================
+# STAGE 2 — FEATURE ENGINEERING
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 2 — FEATURE ENGINEERING")
+print("=" * 70)
+
+
+# ------------------------------------------------------------
+# 1. CREATE COPIES
+# ------------------------------------------------------------
+
+train_fe = train.copy()
+test_fe = test.copy()
+
+
+# ------------------------------------------------------------
+# 2. BASIC NUMERICAL FEATURES
+# ------------------------------------------------------------
+
+# Total charging infrastructure available
+train_fe["Total_Charging_Stations"] = (
+    train_fe["Charging_Stations_Near_Home"]
+    + train_fe["Charging_Stations_Near_Work"]
+)
+
+test_fe["Total_Charging_Stations"] = (
+    test_fe["Charging_Stations_Near_Home"]
+    + test_fe["Charging_Stations_Near_Work"]
+)
+
+
+# Difference between work and home charging availability
+train_fe["Charging_Station_Gap"] = (
+    train_fe["Charging_Stations_Near_Work"]
+    - train_fe["Charging_Stations_Near_Home"]
+)
+
+test_fe["Charging_Station_Gap"] = (
+    test_fe["Charging_Stations_Near_Work"]
+    - test_fe["Charging_Stations_Near_Home"]
+)
+
+
+# ------------------------------------------------------------
+# 3. INCOME-BASED FEATURES
+# ------------------------------------------------------------
+
+# Income relative to age
+train_fe["Income_per_Age"] = (
+    train_fe["Annual_Income_USD"] / train_fe["Age"]
+)
+
+test_fe["Income_per_Age"] = (
+    test_fe["Annual_Income_USD"] / test_fe["Age"]
+)
+
+
+# Income per car owned
+train_fe["Income_per_Car"] = (
+    train_fe["Annual_Income_USD"]
+    / train_fe["Number_of_Cars_Owned"].clip(lower=1)
+)
+
+test_fe["Income_per_Car"] = (
+    test_fe["Annual_Income_USD"]
+    / test_fe["Number_of_Cars_Owned"].clip(lower=1)
+)
+
+
+# ------------------------------------------------------------
+# 4. COMMUTE FEATURES
+# ------------------------------------------------------------
+
+# Income relative to commute distance
+train_fe["Income_per_Commute"] = (
+    train_fe["Annual_Income_USD"]
+    / train_fe["Daily_Commute_km"].clip(lower=1)
+)
+
+test_fe["Income_per_Commute"] = (
+    test_fe["Annual_Income_USD"]
+    / test_fe["Daily_Commute_km"].clip(lower=1)
+)
+
+
+# ------------------------------------------------------------
+# 5. INTERACTION FEATURES
+# ------------------------------------------------------------
+
+# Environmental concern × income
+train_fe["Environmental_Income"] = (
+    train_fe["Environmental_Concern_Level"]
+    * train_fe["Annual_Income_USD"]
+)
+
+test_fe["Environmental_Income"] = (
+    test_fe["Environmental_Concern_Level"]
+    * test_fe["Annual_Income_USD"]
+)
+
+
+# Environmental concern × charging access
+train_fe["Environmental_Charging"] = (
+    train_fe["Environmental_Concern_Level"]
+    * train_fe["Total_Charging_Stations"]
+)
+
+test_fe["Environmental_Charging"] = (
+    test_fe["Environmental_Concern_Level"]
+    * test_fe["Total_Charging_Stations"]
+)
+
+
+# Commute × charging access
+train_fe["Commute_Charging"] = (
+    train_fe["Daily_Commute_km"]
+    * train_fe["Total_Charging_Stations"]
+)
+
+test_fe["Commute_Charging"] = (
+    test_fe["Daily_Commute_km"]
+    * test_fe["Total_Charging_Stations"]
+)
+
+
+# Income × number of cars
+train_fe["Income_Cars"] = (
+    train_fe["Annual_Income_USD"]
+    * train_fe["Number_of_Cars_Owned"]
+)
+
+test_fe["Income_Cars"] = (
+    test_fe["Annual_Income_USD"]
+    * test_fe["Number_of_Cars_Owned"]
+)
+
+
+# ------------------------------------------------------------
+# 6. PRINT NEW FEATURES
+# ------------------------------------------------------------
+
+new_features = [
+    "Total_Charging_Stations",
+    "Charging_Station_Gap",
+    "Income_per_Age",
+    "Income_per_Car",
+    "Income_per_Commute",
+    "Environmental_Income",
+    "Environmental_Charging",
+    "Commute_Charging",
+    "Income_Cars"
+]
+
+print("\nNew engineered features:")
+for feature in new_features:
+    print(" -", feature)
+
+
+print("\nOriginal train shape:", train.shape)
+print("Feature-engineered train shape:", train_fe.shape)
+
+
+# ------------------------------------------------------------
+# 7. PREPARE TARGET
+# ------------------------------------------------------------
+
+y_fe = train_fe["Will_Buy_EV"].map({
+    "No": 0,
+    "Yes": 1
+})
+
+X_fe = train_fe.drop(columns=["Will_Buy_EV"])
+X_test_fe = test_fe.copy()
+
+
+# ------------------------------------------------------------
+# 8. IDENTIFY COLUMNS
+# ------------------------------------------------------------
+
+numeric_features_fe = X_fe.select_dtypes(
+    include=["int64", "float64"]
+).columns.tolist()
+
+categorical_features_fe = X_fe.select_dtypes(
+    include=["object", "str"]
+).columns.tolist()
+
+
+print("\nNumerical features:", len(numeric_features_fe))
+print("Categorical features:", len(categorical_features_fe))
+
+
+# ------------------------------------------------------------
+# 9. PREPROCESSING
+# ------------------------------------------------------------
+
+preprocessor_fe = ColumnTransformer(
+    transformers=[
+        (
+            "num",
+            "passthrough",
+            numeric_features_fe
+        ),
+        (
+            "cat",
+            OrdinalEncoder(
+                handle_unknown="use_encoded_value",
+                unknown_value=-1
+            ),
+            categorical_features_fe
+        )
+    ]
+)
+
+
+# ------------------------------------------------------------
+# 10. FEATURE-ENGINEERED HISTGRADIENTBOOSTING
+# ------------------------------------------------------------
+
+hgb_fe = Pipeline(
+    steps=[
+        ("preprocessor", preprocessor_fe),
+        (
+            "model",
+            HistGradientBoostingClassifier(
+                learning_rate=0.08,
+                max_iter=300,
+                max_leaf_nodes=31,
+                min_samples_leaf=30,
+                l2_regularization=1.0,
+                random_state=42
+            )
+        )
+    ]
+)
+
+
+# ------------------------------------------------------------
+# 11. 5-FOLD CROSS VALIDATION
+# ------------------------------------------------------------
+
+skf_fe = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+oof_predictions_fe = np.zeros(len(X_fe))
+
+print("\n" + "=" * 70)
+print("FEATURE-ENGINEERED HISTGRADIENTBOOSTING")
+print("=" * 70)
+
+for fold, (train_idx, valid_idx) in enumerate(
+    skf_fe.split(X_fe, y_fe), 1
+):
+
+    print(f"\nTraining Fold {fold}/5...")
+
+    X_train_fold = X_fe.iloc[train_idx]
+    X_valid_fold = X_fe.iloc[valid_idx]
+
+    y_train_fold = y_fe.iloc[train_idx]
+    y_valid_fold = y_fe.iloc[valid_idx]
+
+    hgb_fe.fit(
+        X_train_fold,
+        y_train_fold
+    )
+
+    valid_pred = hgb_fe.predict_proba(
+        X_valid_fold
+    )[:, 1]
+
+    oof_predictions_fe[valid_idx] = valid_pred
+
+    fold_auc = roc_auc_score(
+        y_valid_fold,
+        valid_pred
+    )
+
+    print(
+        f"Fold {fold} ROC-AUC: {fold_auc:.6f}"
+    )
+
+
+# ------------------------------------------------------------
+# 12. OVERALL SCORE
+# ------------------------------------------------------------
+
+fe_auc = roc_auc_score(
+    y_fe,
+    oof_predictions_fe
+)
+
+fe_accuracy = accuracy_score(
+    y_fe,
+    (oof_predictions_fe >= 0.50).astype(int)
+)
+
+
+print("\n" + "=" * 70)
+print("STAGE 2 RESULTS")
+print("=" * 70)
+
+print(
+    f"Original best ROC-AUC : {0.941408:.6f}"
+)
+
+print(
+    f"Feature-engineered ROC-AUC : {fe_auc:.6f}"
+)
+
+print(
+    f"Feature-engineered Accuracy : {fe_accuracy:.6f}"
+)
+
+
+# ------------------------------------------------------------
+# 13. IMPROVEMENT
+# ------------------------------------------------------------
+
+improvement = fe_auc - 0.941408
+
+print(
+    f"\nROC-AUC improvement: {improvement:+.6f}"
+)
+
+if improvement > 0:
+    print("SUCCESS: Feature engineering improved the model!")
+else:
+    print("Feature engineering did not improve the benchmark.")
