@@ -970,3 +970,579 @@ if improvement > 0:
     print("SUCCESS: Feature engineering improved the model!")
 else:
     print("Feature engineering did not improve the benchmark.")
+
+
+# ============================================================
+# MODEL DEVELOPMENT AND CROSS-VALIDATION
+# ============================================================
+
+print("\n" + "=" * 70)
+print("MODEL DEVELOPMENT AND CROSS-VALIDATION")
+print("=" * 70)
+
+
+# ------------------------------------------------------------
+# 1. PREPARE FEATURE-ENGINEERED DATA
+# ------------------------------------------------------------
+
+# Remove target and ID from the feature set
+
+X_model = X_fe.drop(
+    columns=["Will_Buy_EV", "id"],
+    errors="ignore"
+).copy()
+
+X_test_model = X_test_fe.drop(
+    columns=["id"],
+    errors="ignore"
+).copy()
+
+
+# Make sure train and test contain the same features
+
+missing_in_test = set(X_model.columns) - set(X_test_model.columns)
+
+extra_in_test = set(X_test_model.columns) - set(X_model.columns)
+
+
+if missing_in_test:
+
+    raise ValueError(
+        f"Columns missing from test data: {missing_in_test}"
+    )
+
+
+if extra_in_test:
+
+    print(
+        "\nDropping extra test columns:",
+        extra_in_test
+    )
+
+    X_test_model = X_test_model.drop(
+        columns=list(extra_in_test)
+    )
+
+
+# Match test column order to training data
+
+X_test_model = X_test_model[X_model.columns]
+
+
+# Replace infinite values created by ratio features
+
+X_model = X_model.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+X_test_model = X_test_model.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+
+print("\nTraining shape:")
+print(X_model.shape)
+
+print("\nTest shape:")
+print(X_test_model.shape)
+
+
+# ------------------------------------------------------------
+# 2. IDENTIFY FEATURE TYPES
+# ------------------------------------------------------------
+
+numeric_features_model = X_model.select_dtypes(
+    include=[
+        "int64",
+        "int32",
+        "float64",
+        "float32"
+    ]
+).columns.tolist()
+
+
+categorical_features_model = X_model.select_dtypes(
+    include=[
+        "object",
+        "string",
+        "category",
+        "bool"
+    ]
+).columns.tolist()
+
+
+print("\nNumerical features:")
+print(numeric_features_model)
+
+print(
+    "\nNumber of numerical features:",
+    len(numeric_features_model)
+)
+
+
+print("\nCategorical features:")
+print(categorical_features_model)
+
+print(
+    "\nNumber of categorical features:",
+    len(categorical_features_model)
+)
+
+
+# ------------------------------------------------------------
+# 3. ROBUST PREPROCESSING
+# ------------------------------------------------------------
+
+numeric_pipeline_model = Pipeline([
+    (
+        "imputer",
+        SimpleImputer(
+            strategy="median"
+        )
+    )
+])
+
+
+categorical_pipeline_model = Pipeline([
+    (
+        "imputer",
+        SimpleImputer(
+            strategy="most_frequent"
+        )
+    ),
+    (
+        "encoder",
+        OrdinalEncoder(
+            handle_unknown="use_encoded_value",
+            unknown_value=-1
+        )
+    )
+])
+
+
+model_preprocessor = ColumnTransformer([
+    (
+        "numeric",
+        numeric_pipeline_model,
+        numeric_features_model
+    ),
+    (
+        "categorical",
+        categorical_pipeline_model,
+        categorical_features_model
+    )
+])
+
+
+# ------------------------------------------------------------
+# 4. CANDIDATE MODELS
+# ------------------------------------------------------------
+
+candidate_models = {
+
+    "HistGradientBoosting":
+    HistGradientBoostingClassifier(
+        learning_rate=0.05,
+        max_iter=500,
+        max_leaf_nodes=31,
+        min_samples_leaf=20,
+        l2_regularization=1.0,
+        random_state=42
+    ),
+
+    "ExtraTrees":
+    ExtraTreesClassifier(
+        n_estimators=500,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    ),
+
+    "RandomForest":
+    RandomForestClassifier(
+        n_estimators=500,
+        min_samples_leaf=2,
+        max_features="sqrt",
+        class_weight="balanced",
+        random_state=42,
+        n_jobs=-1
+    )
+}
+
+
+# ------------------------------------------------------------
+# 5. STRATIFIED 5-FOLD CROSS-VALIDATION
+# ------------------------------------------------------------
+
+model_skf = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+
+model_results = {}
+
+model_oof_predictions = {}
+
+
+# ------------------------------------------------------------
+# 6. TRAIN AND EVALUATE EACH MODEL
+# ------------------------------------------------------------
+
+for model_name, classifier in candidate_models.items():
+
+    print("\n")
+    print("=" * 70)
+    print(f"MODEL: {model_name}")
+    print("=" * 70)
+
+
+    # OOF predictions for this model
+
+    oof_predictions = np.zeros(
+        len(X_model)
+    )
+
+
+    # Store each fold's ROC-AUC
+
+    fold_scores = []
+
+
+    # --------------------------------------------------------
+    # 7. TRAIN EACH FOLD
+    # --------------------------------------------------------
+
+    for fold, (train_idx, valid_idx) in enumerate(
+        model_skf.split(
+            X_model,
+            y_fe
+        ),
+        start=1
+    ):
+
+        print(
+            f"\nTraining Fold {fold}/5..."
+        )
+
+
+        # Split training and validation data
+
+        X_train_fold = X_model.iloc[
+            train_idx
+        ]
+
+        X_valid_fold = X_model.iloc[
+            valid_idx
+        ]
+
+
+        y_train_fold = y_fe.iloc[
+            train_idx
+        ]
+
+        y_valid_fold = y_fe.iloc[
+            valid_idx
+        ]
+
+
+        # ----------------------------------------------------
+        # CREATE PIPELINE
+        # ----------------------------------------------------
+
+        model_pipeline = Pipeline([
+            (
+                "preprocessor",
+                model_preprocessor
+            ),
+            (
+                "model",
+                classifier
+            )
+        ])
+
+
+        # ----------------------------------------------------
+        # TRAIN
+        # ----------------------------------------------------
+
+        model_pipeline.fit(
+            X_train_fold,
+            y_train_fold
+        )
+
+
+        # ----------------------------------------------------
+        # VALIDATION PROBABILITIES
+        # ----------------------------------------------------
+
+        valid_pred = model_pipeline.predict_proba(
+            X_valid_fold
+        )[:, 1]
+
+
+        # ----------------------------------------------------
+        # STORE OOF PREDICTIONS
+        # ----------------------------------------------------
+
+        oof_predictions[
+            valid_idx
+        ] = valid_pred
+
+
+        # ----------------------------------------------------
+        # CALCULATE FOLD ROC-AUC
+        # ----------------------------------------------------
+
+        fold_auc = roc_auc_score(
+            y_valid_fold,
+            valid_pred
+        )
+
+
+        fold_scores.append(
+            fold_auc
+        )
+
+
+        print(
+            f"Fold {fold} ROC-AUC: "
+            f"{fold_auc:.6f}"
+        )
+
+
+    # --------------------------------------------------------
+    # 8. OVERALL OOF PERFORMANCE
+    # --------------------------------------------------------
+
+    overall_auc = roc_auc_score(
+        y_fe,
+        oof_predictions
+    )
+
+
+    accuracy_050 = accuracy_score(
+        y_fe,
+        (
+            oof_predictions >= 0.50
+        ).astype(int)
+    )
+
+
+    mean_fold_auc = np.mean(
+        fold_scores
+    )
+
+
+    std_fold_auc = np.std(
+        fold_scores
+    )
+
+
+    # --------------------------------------------------------
+    # 9. STORE MODEL RESULTS
+    # --------------------------------------------------------
+
+    model_results[model_name] = {
+
+        "auc": overall_auc,
+
+        "accuracy": accuracy_050,
+
+        "mean_fold_auc": mean_fold_auc,
+
+        "std_fold_auc": std_fold_auc,
+
+        "fold_scores": fold_scores
+    }
+
+
+    model_oof_predictions[
+        model_name
+    ] = oof_predictions
+
+
+    # --------------------------------------------------------
+    # 10. PRINT MODEL PERFORMANCE
+    # --------------------------------------------------------
+
+    print("\nOverall OOF ROC-AUC:")
+
+    print(
+        f"{overall_auc:.6f}"
+    )
+
+
+    print("\nAccuracy @ 0.50:")
+
+    print(
+        f"{accuracy_050:.6f}"
+    )
+
+
+    print("\nMean Fold ROC-AUC:")
+
+    print(
+        f"{mean_fold_auc:.6f}"
+    )
+
+
+    print("\nFold ROC-AUC Std:")
+
+    print(
+        f"{std_fold_auc:.6f}"
+    )
+
+
+# ============================================================
+# 11. MODEL COMPARISON
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("MODEL COMPARISON")
+print("=" * 70)
+
+
+for model_name, result in model_results.items():
+
+    print(
+        f"{model_name:25s}"
+        f"ROC-AUC = {result['auc']:.6f} | "
+        f"Accuracy = {result['accuracy']:.6f} | "
+        f"Mean Fold AUC = {result['mean_fold_auc']:.6f} | "
+        f"Std = {result['std_fold_auc']:.6f}"
+    )
+
+
+# ============================================================
+# 12. SELECT CURRENT BEST MODEL
+# ============================================================
+
+best_model_name = max(
+    model_results,
+    key=lambda name:
+    model_results[name]["auc"]
+)
+
+
+best_model_auc = model_results[
+    best_model_name
+]["auc"]
+
+
+best_model_oof = model_oof_predictions[
+    best_model_name
+]
+
+
+print("\n")
+print("=" * 70)
+print("BEST MODEL")
+print("=" * 70)
+
+
+print(
+    f"Best model: {best_model_name}"
+)
+
+
+print(
+    f"Best OOF ROC-AUC: "
+    f"{best_model_auc:.6f}"
+)
+
+
+# ============================================================
+# 13. COMPARE AGAINST STAGE 2
+# ============================================================
+
+previous_auc = fe_auc
+
+
+improvement = (
+    best_model_auc - previous_auc
+)
+
+
+print("\n")
+print("=" * 70)
+print("IMPROVEMENT")
+print("=" * 70)
+
+
+print(
+    f"Previous ROC-AUC: "
+    f"{previous_auc:.6f}"
+)
+
+
+print(
+    f"Current ROC-AUC: "
+    f"{best_model_auc:.6f}"
+)
+
+
+print(
+    f"Improvement: "
+    f"{improvement:+.6f}"
+)
+
+
+if improvement > 0:
+
+    print(
+        "\nSUCCESS: The current models improved "
+        "the previous benchmark."
+    )
+
+elif improvement == 0:
+
+    print(
+        "\nThe current models matched "
+        "the previous benchmark."
+    )
+
+else:
+
+    print(
+        "\nThe current models did not improve "
+        "the previous benchmark."
+    )
+
+
+# ============================================================
+# 14. MODEL DEVELOPMENT COMPLETE
+# ============================================================
+
+print("\n")
+print("=" * 70)
+print("MODEL DEVELOPMENT COMPLETE")
+print("=" * 70)
+
+
+print(
+    f"Best model: {best_model_name}"
+)
+
+
+print(
+    f"Best ROC-AUC: "
+    f"{best_model_auc:.6f}"
+)
+
+
+print(
+    "\nNo final submission was created yet."
+)
+
+
+print(
+    "The next step will focus on further "
+    "model optimization."
+)
