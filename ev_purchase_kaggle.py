@@ -1546,3 +1546,355 @@ print(
     "The next step will focus on further "
     "model optimization."
 )
+
+# ============================================================
+# STAGE 4 — FINAL MODEL TRAINING & KAGGLE SUBMISSION
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 4 — FINAL MODEL TRAINING & KAGGLE SUBMISSION")
+print("=" * 70)
+
+
+# ------------------------------------------------------------
+# 1. PREPARE FINAL TRAINING DATA
+# ------------------------------------------------------------
+
+print("\nPreparing final training data...")
+
+# Remove target and ID from the feature set
+X_final = X_fe.drop(
+    columns=["Will_Buy_EV", "id"],
+    errors="ignore"
+).copy()
+
+X_test_final = X_test_fe.drop(
+    columns=["Will_Buy_EV", "id"],
+    errors="ignore"
+).copy()
+
+
+# ------------------------------------------------------------
+# 2. TARGET ENCODING
+# ------------------------------------------------------------
+
+print("\nEncoding target...")
+
+# Use the original target column directly.
+# This avoids relying on the modified `y` variable from Stage 3.
+
+y_final = train["Will_Buy_EV"].map({
+    "No": 0,
+    "Yes": 1
+})
+
+# Check whether encoding produced missing values
+if y_final.isnull().any():
+    raise ValueError(
+        "Target encoding failed. Unexpected values found in "
+        "train['Will_Buy_EV']."
+    )
+
+y_final = y_final.astype(int)
+
+
+print("\nFinal training shape:")
+print(X_final.shape)
+
+print("\nFinal test shape:")
+print(X_test_final.shape)
+
+print("\nTarget distribution:")
+print(y_final.value_counts())
+
+print("\nTarget rate:")
+print(y_final.mean())
+
+
+# ------------------------------------------------------------
+# 3. IDENTIFY FEATURE TYPES
+# ------------------------------------------------------------
+
+numeric_features = X_final.select_dtypes(
+    include=["int64", "float64"]
+).columns.tolist()
+
+categorical_features = X_final.select_dtypes(
+    include=["object", "category", "string"]
+).columns.tolist()
+
+
+print("\nNumerical features:")
+print(numeric_features)
+
+print("\nNumber of numerical features:")
+print(len(numeric_features))
+
+print("\nCategorical features:")
+print(categorical_features)
+
+print("\nNumber of categorical features:")
+print(len(categorical_features))
+
+
+# ------------------------------------------------------------
+# 4. HANDLE NON-FINITE NUMERICAL VALUES
+# ------------------------------------------------------------
+
+print("\nChecking numerical features for non-finite values...")
+
+# Replace +inf and -inf with NaN.
+# SimpleImputer below will then replace NaN values with
+# the median calculated from the training data.
+
+X_final[numeric_features] = X_final[numeric_features].replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+X_test_final[numeric_features] = X_test_final[numeric_features].replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+print("Non-finite numerical values handled.")
+
+
+# ------------------------------------------------------------
+# 5. BUILD FINAL PREPROCESSING PIPELINE
+# ------------------------------------------------------------
+
+numeric_transformer = Pipeline(
+    steps=[
+        (
+            "imputer",
+            SimpleImputer(strategy="median")
+        )
+    ]
+)
+
+
+categorical_transformer = Pipeline(
+    steps=[
+        (
+            "imputer",
+            SimpleImputer(strategy="most_frequent")
+        ),
+        (
+            "encoder",
+            OrdinalEncoder(
+                handle_unknown="use_encoded_value",
+                unknown_value=-1
+            )
+        )
+    ]
+)
+
+
+preprocessor_final = ColumnTransformer(
+    transformers=[
+        (
+            "num",
+            numeric_transformer,
+            numeric_features
+        ),
+        (
+            "cat",
+            categorical_transformer,
+            categorical_features
+        )
+    ],
+    remainder="drop"
+)
+
+
+# ------------------------------------------------------------
+# 6. DEFINE FINAL HISTGRADIENTBOOSTING MODEL
+# ------------------------------------------------------------
+
+final_model = HistGradientBoostingClassifier(
+    learning_rate=0.05,
+    max_iter=300,
+    max_leaf_nodes=31,
+    min_samples_leaf=20,
+    l2_regularization=1.0,
+    random_state=42
+)
+
+
+# ------------------------------------------------------------
+# 7. CREATE FINAL PIPELINE
+# ------------------------------------------------------------
+
+final_pipeline = Pipeline(
+    steps=[
+        (
+            "preprocessor",
+            preprocessor_final
+        ),
+        (
+            "model",
+            final_model
+        )
+    ]
+)
+
+
+# ------------------------------------------------------------
+# 8. TRAIN FINAL MODEL ON ALL TRAINING DATA
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("TRAINING FINAL HISTGRADIENTBOOSTING MODEL")
+print("=" * 70)
+
+print("\nTraining on 100% of the available training data...")
+
+final_pipeline.fit(
+    X_final,
+    y_final
+)
+
+print("\nFinal model training completed successfully.")
+
+
+# ------------------------------------------------------------
+# 9. GENERATE TEST PROBABILITIES
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("GENERATING TEST PREDICTIONS")
+print("=" * 70)
+
+test_probabilities = final_pipeline.predict_proba(
+    X_test_final
+)[:, 1]
+
+
+print("\nPrediction summary:")
+print(
+    pd.Series(test_probabilities).describe()
+)
+
+
+# ------------------------------------------------------------
+# 10. CHECK PREDICTIONS
+# ------------------------------------------------------------
+
+print("\nFirst 10 predicted probabilities:")
+print(test_probabilities[:10])
+
+print("\nMinimum prediction:")
+print(test_probabilities.min())
+
+print("\nMaximum prediction:")
+print(test_probabilities.max())
+
+print("\nMean prediction:")
+print(test_probabilities.mean())
+
+
+# ------------------------------------------------------------
+# 11. CREATE SUBMISSION DATAFRAME
+# ------------------------------------------------------------
+
+submission = pd.DataFrame({
+    "id": X_test_fe["id"].values,
+    "Will_Buy_EV": test_probabilities
+})
+
+
+# ------------------------------------------------------------
+# 12. VALIDATE SUBMISSION
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("SUBMISSION VALIDATION")
+print("=" * 70)
+
+print("\nSubmission shape:")
+print(submission.shape)
+
+print("\nExpected test rows:")
+print(len(X_test_fe))
+
+print("\nSubmission columns:")
+print(submission.columns.tolist())
+
+print("\nMissing values:")
+print(submission.isnull().sum())
+
+print("\nDuplicate IDs:")
+print(submission["id"].duplicated().sum())
+
+print("\nID check:")
+print(
+    submission["id"].equals(
+        X_test_fe["id"].reset_index(drop=True)
+    )
+)
+
+
+# ------------------------------------------------------------
+# 13. SAVE SUBMISSION FILE
+# ------------------------------------------------------------
+
+submission.to_csv(
+    "submission.csv",
+    index=False
+)
+
+
+print("\n" + "=" * 70)
+print("SUBMISSION CREATED SUCCESSFULLY")
+print("=" * 70)
+
+print("\nFile:")
+print("submission.csv")
+
+print("\nSubmission shape:")
+print(submission.shape)
+
+print("\nSubmission preview:")
+print(submission.head(10))
+
+
+# ------------------------------------------------------------
+# 14. FINAL FILE CHECK
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("FINAL SUBMISSION CHECK")
+print("=" * 70)
+
+print("\nNumber of rows:", len(submission))
+print("Number of columns:", len(submission.columns))
+print("Missing values:", submission.isnull().sum().sum())
+print("Duplicate IDs:", submission["id"].duplicated().sum())
+
+print("\nPrediction range:")
+print(
+    f"Min = {submission['Will_Buy_EV'].min():.6f}"
+)
+
+print(
+    f"Max = {submission['Will_Buy_EV'].max():.6f}"
+)
+
+print(
+    f"Mean = {submission['Will_Buy_EV'].mean():.6f}"
+)
+
+print("\nFirst 10 submission rows:")
+print(submission.head(10))
+
+print("\n" + "=" * 70)
+print("STAGE 4 COMPLETE")
+print("=" * 70)
+
+print("\nYour submission file is ready:")
+print("submission.csv")
+
+print("\nIMPORTANT:")
+print("Submit the probability values in Will_Buy_EV.")
+print("Do NOT convert them to Yes/No.")
