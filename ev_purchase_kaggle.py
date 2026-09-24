@@ -1898,3 +1898,611 @@ print("submission.csv")
 print("\nIMPORTANT:")
 print("Submit the probability values in Will_Buy_EV.")
 print("Do NOT convert them to Yes/No.")
+
+# ============================================================
+# STAGE 5 — MODEL OPTIMIZATION
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 5 — MODEL OPTIMIZATION")
+print("=" * 70)
+
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import roc_auc_score, accuracy_score
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+
+from sklearn.ensemble import (
+    HistGradientBoostingClassifier,
+    ExtraTreesClassifier,
+    RandomForestClassifier
+)
+
+# ------------------------------------------------------------
+# 1. LOAD DATA
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train = pd.read_csv("train.csv")
+test = pd.read_csv("test.csv")
+
+print("Train shape:", train.shape)
+print("Test shape :", test.shape)
+
+
+# ------------------------------------------------------------
+# 2. TARGET
+# ------------------------------------------------------------
+
+target = "Will_Buy_EV"
+
+y = train[target].map({
+    "No": 0,
+    "Yes": 1
+})
+
+print("\nTarget distribution:")
+print(y.value_counts())
+
+print("\nTarget rate:")
+print(y.mean())
+
+
+# ------------------------------------------------------------
+# 3. FEATURE ENGINEERING
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("FEATURE ENGINEERING")
+print("=" * 70)
+
+
+def create_features(df):
+
+    df = df.copy()
+
+    # --------------------------------------------------------
+    # Charging features
+    # --------------------------------------------------------
+
+    df["Total_Charging_Stations"] = (
+        df["Charging_Stations_Near_Home"]
+        + df["Charging_Stations_Near_Work"]
+    )
+
+    df["Charging_Station_Gap"] = (
+        df["Charging_Stations_Near_Work"]
+        - df["Charging_Stations_Near_Home"]
+    )
+
+    # --------------------------------------------------------
+    # Income relationships
+    # --------------------------------------------------------
+
+    df["Income_per_Age"] = (
+        df["Annual_Income_USD"] /
+        (df["Age"] + 1)
+    )
+
+    df["Income_per_Car"] = (
+        df["Annual_Income_USD"] /
+        (df["Number_of_Cars_Owned"] + 1)
+    )
+
+    df["Income_per_Commute"] = (
+        df["Annual_Income_USD"] /
+        (df["Daily_Commute_km"] + 1)
+    )
+
+    # --------------------------------------------------------
+    # Interaction features
+    # --------------------------------------------------------
+
+    df["Environmental_Income"] = (
+        df["Environmental_Concern_Level"]
+        * df["Annual_Income_USD"]
+    )
+
+    df["Environmental_Charging"] = (
+        df["Environmental_Concern_Level"]
+        * df["Total_Charging_Stations"]
+    )
+
+    df["Commute_Charging"] = (
+        df["Daily_Commute_km"]
+        * df["Total_Charging_Stations"]
+    )
+
+    df["Income_Cars"] = (
+        df["Annual_Income_USD"]
+        * (df["Number_of_Cars_Owned"] + 1)
+    )
+
+    return df
+
+
+train_fe = create_features(train)
+test_fe = create_features(test)
+
+print("\nFeature-engineered train shape:")
+print(train_fe.shape)
+
+print("\nFeature-engineered test shape:")
+print(test_fe.shape)
+
+
+# ------------------------------------------------------------
+# 4. REMOVE TARGET AND ID
+# ------------------------------------------------------------
+
+X = train_fe.drop(
+    columns=[target, "id"],
+    errors="ignore"
+).copy()
+
+X_test = test_fe.drop(
+    columns=["id"],
+    errors="ignore"
+).copy()
+
+
+# ------------------------------------------------------------
+# 5. IDENTIFY FEATURES
+# ------------------------------------------------------------
+
+categorical_features = X.select_dtypes(
+    include=["object", "str", "category"]
+).columns.tolist()
+
+numerical_features = X.select_dtypes(
+    include=[np.number]
+).columns.tolist()
+
+print("\nNumerical features:")
+print(numerical_features)
+
+print("\nNumber of numerical features:",
+      len(numerical_features))
+
+print("\nCategorical features:")
+print(categorical_features)
+
+print("\nNumber of categorical features:",
+      len(categorical_features))
+
+
+# ------------------------------------------------------------
+# 6. PREPROCESSING
+# ------------------------------------------------------------
+
+numeric_transformer = Pipeline(
+    steps=[
+        (
+            "imputer",
+            SimpleImputer(strategy="median")
+        )
+    ]
+)
+
+categorical_transformer = Pipeline(
+    steps=[
+        (
+            "imputer",
+            SimpleImputer(strategy="most_frequent")
+        ),
+        (
+            "encoder",
+            OrdinalEncoder(
+                handle_unknown="use_encoded_value",
+                unknown_value=-1
+            )
+        )
+    ]
+)
+
+preprocessor = ColumnTransformer(
+    transformers=[
+        (
+            "num",
+            numeric_transformer,
+            numerical_features
+        ),
+        (
+            "cat",
+            categorical_transformer,
+            categorical_features
+        )
+    ],
+    remainder="drop"
+)
+
+
+# ------------------------------------------------------------
+# 7. PREPARE DATA
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("PREPARING DATA")
+print("=" * 70)
+
+X_processed = preprocessor.fit_transform(X)
+X_test_processed = preprocessor.transform(X_test)
+
+X_processed = np.asarray(
+    X_processed,
+    dtype=np.float64
+)
+
+X_test_processed = np.asarray(
+    X_test_processed,
+    dtype=np.float64
+)
+
+# Replace possible non-finite values
+X_processed = np.nan_to_num(
+    X_processed,
+    nan=0.0,
+    posinf=0.0,
+    neginf=0.0
+)
+
+X_test_processed = np.nan_to_num(
+    X_test_processed,
+    nan=0.0,
+    posinf=0.0,
+    neginf=0.0
+)
+
+print("\nProcessed training shape:")
+print(X_processed.shape)
+
+print("\nProcessed test shape:")
+print(X_test_processed.shape)
+
+
+# ------------------------------------------------------------
+# 8. CROSS-VALIDATION SETUP
+# ------------------------------------------------------------
+
+skf = StratifiedKFold(
+    n_splits=5,
+    shuffle=True,
+    random_state=42
+)
+
+
+# ------------------------------------------------------------
+# 9. MODEL CONFIGURATIONS
+# ------------------------------------------------------------
+
+models = {
+
+    "HGB_Optimized_1": HistGradientBoostingClassifier(
+        learning_rate=0.05,
+        max_iter=350,
+        max_leaf_nodes=31,
+        min_samples_leaf=30,
+        l2_regularization=1.0,
+        random_state=42
+    ),
+
+    "HGB_Optimized_2": HistGradientBoostingClassifier(
+        learning_rate=0.04,
+        max_iter=450,
+        max_leaf_nodes=31,
+        min_samples_leaf=30,
+        l2_regularization=1.0,
+        random_state=42
+    ),
+
+    "HGB_Optimized_3": HistGradientBoostingClassifier(
+        learning_rate=0.05,
+        max_iter=300,
+        max_leaf_nodes=63,
+        min_samples_leaf=30,
+        l2_regularization=1.0,
+        random_state=42
+    ),
+
+    "HGB_Optimized_4": HistGradientBoostingClassifier(
+        learning_rate=0.03,
+        max_iter=500,
+        max_leaf_nodes=63,
+        min_samples_leaf=30,
+        l2_regularization=2.0,
+        random_state=42
+    )
+}
+
+
+# ------------------------------------------------------------
+# 10. MODEL EVALUATION
+# ------------------------------------------------------------
+
+results = []
+
+best_model_name = None
+best_auc = -np.inf
+best_oof_predictions = None
+
+
+for model_name, model in models.items():
+
+    print("\n" + "=" * 70)
+    print("MODEL:", model_name)
+    print("=" * 70)
+
+    oof_predictions = np.zeros(len(X_processed))
+
+    fold_scores = []
+
+    for fold, (train_idx, valid_idx) in enumerate(
+        skf.split(X_processed, y),
+        start=1
+    ):
+
+        print(
+            f"\nTraining Fold {fold}/5..."
+        )
+
+        X_train = X_processed[train_idx]
+        X_valid = X_processed[valid_idx]
+
+        y_train = y.iloc[train_idx]
+        y_valid = y.iloc[valid_idx]
+
+        model.fit(
+            X_train,
+            y_train
+        )
+
+        valid_pred = model.predict_proba(
+            X_valid
+        )[:, 1]
+
+        oof_predictions[valid_idx] = valid_pred
+
+        fold_auc = roc_auc_score(
+            y_valid,
+            valid_pred
+        )
+
+        fold_scores.append(fold_auc)
+
+        print(
+            f"Fold {fold} ROC-AUC: "
+            f"{fold_auc:.6f}"
+        )
+
+    overall_auc = roc_auc_score(
+        y,
+        oof_predictions
+    )
+
+    mean_auc = np.mean(fold_scores)
+    std_auc = np.std(fold_scores)
+
+    accuracy = accuracy_score(
+        y,
+        (oof_predictions >= 0.50).astype(int)
+    )
+
+    print("\nOverall OOF ROC-AUC:")
+    print(f"{overall_auc:.6f}")
+
+    print("\nMean Fold ROC-AUC:")
+    print(f"{mean_auc:.6f}")
+
+    print("\nFold ROC-AUC Std:")
+    print(f"{std_auc:.6f}")
+
+    print("\nAccuracy @ 0.50:")
+    print(f"{accuracy:.6f}")
+
+    results.append({
+        "Model": model_name,
+        "OOF_ROC_AUC": overall_auc,
+        "Mean_Fold_AUC": mean_auc,
+        "Std_Fold_AUC": std_auc,
+        "Accuracy": accuracy
+    })
+
+    if overall_auc > best_auc:
+
+        best_auc = overall_auc
+
+        best_model_name = model_name
+
+        best_oof_predictions = (
+            oof_predictions.copy()
+        )
+
+
+# ------------------------------------------------------------
+# 11. MODEL COMPARISON
+# ------------------------------------------------------------
+
+results_df = pd.DataFrame(results)
+
+results_df = results_df.sort_values(
+    by="OOF_ROC_AUC",
+    ascending=False
+)
+
+print("\n" + "=" * 70)
+print("STAGE 5 MODEL COMPARISON")
+print("=" * 70)
+
+print(
+    results_df.to_string(
+        index=False
+    )
+)
+
+
+# ------------------------------------------------------------
+# 12. BEST MODEL
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("BEST MODEL")
+print("=" * 70)
+
+print("Best model:", best_model_name)
+
+print(
+    f"Best OOF ROC-AUC: "
+    f"{best_auc:.6f}"
+)
+
+
+# ------------------------------------------------------------
+# 13. COMPARE WITH STAGE 4
+# ------------------------------------------------------------
+
+stage4_auc = 0.941392
+
+improvement = best_auc - stage4_auc
+
+print("\n" + "=" * 70)
+print("COMPARISON WITH STAGE 4")
+print("=" * 70)
+
+print(
+    f"Stage 4 ROC-AUC : "
+    f"{stage4_auc:.6f}"
+)
+
+print(
+    f"Stage 5 ROC-AUC : "
+    f"{best_auc:.6f}"
+)
+
+print(
+    f"Improvement     : "
+    f"{improvement:+.6f}"
+)
+
+if improvement > 0:
+
+    print(
+        "\nSUCCESS: Stage 5 improved "
+        "the Stage 4 benchmark."
+    )
+
+else:
+
+    print(
+        "\nNo improvement over Stage 4."
+    )
+
+    print(
+        "Keep the Stage 4 model/submission "
+        "as the current benchmark."
+    )
+
+
+# ------------------------------------------------------------
+# 14. THRESHOLD SEARCH
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("THRESHOLD SEARCH")
+print("=" * 70)
+
+thresholds = np.arange(
+    0.10,
+    0.91,
+    0.01
+)
+
+best_threshold = 0.50
+best_accuracy = 0.0
+
+for threshold in thresholds:
+
+    predictions = (
+        best_oof_predictions >= threshold
+    ).astype(int)
+
+    acc = accuracy_score(
+        y,
+        predictions
+    )
+
+    if acc > best_accuracy:
+
+        best_accuracy = acc
+        best_threshold = threshold
+
+
+print(
+    f"Best threshold: "
+    f"{best_threshold:.2f}"
+)
+
+print(
+    f"Best OOF accuracy: "
+    f"{best_accuracy:.6f}"
+)
+
+
+# ------------------------------------------------------------
+# 15. SAVE STAGE 5 RESULTS
+# ------------------------------------------------------------
+
+results_df.to_csv(
+    "stage5_model_results.csv",
+    index=False
+)
+
+print("\nResults saved as:")
+print("stage5_model_results.csv")
+
+
+# ------------------------------------------------------------
+# 16. FINAL DECISION
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("STAGE 5 COMPLETE")
+print("=" * 70)
+
+if improvement > 0:
+
+    print(
+        "A new model has improved the "
+        "Stage 4 benchmark."
+    )
+
+    print(
+        "Next step: train the winning "
+        "Stage 5 model on 100% of the data "
+        "and create a new submission."
+    )
+
+else:
+
+    print(
+        "No model improved Stage 4."
+    )
+
+    print(
+        "The Stage 4 submission remains "
+        "the current benchmark."
+    )
+
+print("\nBest model:", best_model_name)
+print(f"Best ROC-AUC: {best_auc:.6f}")
+print(f"Stage 4 ROC-AUC: {stage4_auc:.6f}")
+print(f"Improvement: {improvement:+.6f}")
+
+print("\n" + "=" * 70)
