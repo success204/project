@@ -2506,3 +2506,775 @@ print(f"Stage 4 ROC-AUC: {stage4_auc:.6f}")
 print(f"Improvement: {improvement:+.6f}")
 
 print("\n" + "=" * 70)
+
+# ============================================================
+# STAGE 6 — XGBOOST ALTERNATIVE MODEL
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 6 — XGBOOST ALTERNATIVE MODEL")
+print("=" * 70)
+
+# ------------------------------------------------------------
+# 1. IMPORTS
+# ------------------------------------------------------------
+
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import StratifiedKFold
+from sklearn.metrics import (
+    roc_auc_score,
+    accuracy_score
+)
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    raise ImportError(
+        "\nXGBoost is not installed.\n"
+        "Install it with:\n"
+        "pip install xgboost\n"
+    )
+
+
+# ------------------------------------------------------------
+# 2. CONFIGURATION
+# ------------------------------------------------------------
+
+TRAIN_FILE = "train.csv"
+TEST_FILE = "test.csv"
+
+TARGET = "Will_Buy_EV"
+ID_COL = "id"
+
+RANDOM_STATE = 42
+N_SPLITS = 5
+
+
+# ------------------------------------------------------------
+# 3. LOAD DATA
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train = pd.read_csv(TRAIN_FILE)
+test = pd.read_csv(TEST_FILE)
+
+print("Train shape:", train.shape)
+print("Test shape :", test.shape)
+
+
+# ------------------------------------------------------------
+# 4. TARGET ENCODING
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("TARGET ANALYSIS")
+print("=" * 70)
+
+print("\nOriginal target distribution:")
+print(train[TARGET].value_counts())
+
+print("\nOriginal target percentages:")
+print(
+    train[TARGET]
+    .value_counts(normalize=True)
+    .mul(100)
+    .round(2)
+)
+
+# Convert:
+# No  -> 0
+# Yes -> 1
+
+y = train[TARGET].map({
+    "No": 0,
+    "Yes": 1
+})
+
+# Check for unexpected values
+if y.isna().any():
+    print("\nERROR: Unexpected target values:")
+    print(train.loc[y.isna(), TARGET].value_counts())
+    raise ValueError(
+        "TARGET must contain only 'Yes' and 'No'."
+    )
+
+y = y.astype(np.int8)
+
+print("\nEncoded target rate:")
+print(f"{y.mean():.4f} ({y.mean() * 100:.2f}%)")
+
+
+# ------------------------------------------------------------
+# 5. REMOVE ID
+# ------------------------------------------------------------
+
+X = train.drop(
+    columns=[TARGET, ID_COL]
+).copy()
+
+X_test = test.drop(
+    columns=[ID_COL]
+).copy()
+
+print("\nInitial feature shape:")
+print(X.shape)
+
+print("\nInitial test feature shape:")
+print(X_test.shape)
+
+
+# ------------------------------------------------------------
+# 6. FEATURE ENGINEERING
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("FEATURE ENGINEERING")
+print("=" * 70)
+
+
+def feature_engineering(df):
+
+    df = df.copy()
+
+    # --------------------------------------------------------
+    # Charging infrastructure
+    # --------------------------------------------------------
+
+    df["Total_Charging_Stations"] = (
+        df["Charging_Stations_Near_Home"]
+        + df["Charging_Stations_Near_Work"]
+    )
+
+    df["Charging_Station_Gap"] = (
+        df["Charging_Stations_Near_Home"]
+        - df["Charging_Stations_Near_Work"]
+    )
+
+    # --------------------------------------------------------
+    # Income relationships
+    # --------------------------------------------------------
+
+    df["Income_per_Age"] = (
+        df["Annual_Income_USD"]
+        / (df["Age"] + 1)
+    )
+
+    df["Income_per_Car"] = (
+        df["Annual_Income_USD"]
+        / (df["Number_of_Cars_Owned"] + 1)
+    )
+
+    df["Income_per_Commute"] = (
+        df["Annual_Income_USD"]
+        / (df["Daily_Commute_km"] + 1)
+    )
+
+    # --------------------------------------------------------
+    # Interaction features
+    # --------------------------------------------------------
+
+    df["Environmental_Income"] = (
+        df["Environmental_Concern_Level"]
+        * df["Annual_Income_USD"]
+    )
+
+    df["Environmental_Charging"] = (
+        df["Environmental_Concern_Level"]
+        * df["Total_Charging_Stations"]
+    )
+
+    df["Commute_Charging"] = (
+        df["Daily_Commute_km"]
+        * df["Total_Charging_Stations"]
+    )
+
+    df["Income_Cars"] = (
+        df["Annual_Income_USD"]
+        * (df["Number_of_Cars_Owned"] + 1)
+    )
+
+    return df
+
+
+X = feature_engineering(X)
+X_test = feature_engineering(X_test)
+
+print("\nFeature-engineered train shape:")
+print(X.shape)
+
+print("\nFeature-engineered test shape:")
+print(X_test.shape)
+
+
+# ------------------------------------------------------------
+# 7. IDENTIFY CATEGORICAL FEATURES
+# ------------------------------------------------------------
+
+categorical_features = [
+    "Gender",
+    "City_Type",
+    "Current_Car_Type",
+    "Home_Charging_Possible",
+    "Subsidy_Available",
+    "Range_Anxiety_Level"
+]
+
+print("\nCategorical features:")
+print(categorical_features)
+
+
+# ------------------------------------------------------------
+# 8. ENCODE CATEGORICAL FEATURES
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("ENCODING CATEGORICAL FEATURES")
+print("=" * 70)
+
+for col in categorical_features:
+
+    # Combine train and test so both use identical mappings
+    combined = pd.concat(
+        [
+            X[col],
+            X_test[col]
+        ],
+        axis=0
+    ).astype(str)
+
+    categories = pd.Categorical(
+        combined
+    ).categories
+
+    mapping = {
+        category: index
+        for index, category in enumerate(categories)
+    }
+
+    X[col] = (
+        X[col]
+        .astype(str)
+        .map(mapping)
+        .astype(np.int32)
+    )
+
+    X_test[col] = (
+        X_test[col]
+        .astype(str)
+        .map(mapping)
+        .astype(np.int32)
+    )
+
+
+print("\nCategorical encoding completed.")
+
+
+# ------------------------------------------------------------
+# 9. NUMERIC CONVERSION
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("CLEANING NUMERIC FEATURES")
+print("=" * 70)
+
+for col in X.columns:
+
+    if col not in categorical_features:
+
+        X[col] = pd.to_numeric(
+            X[col],
+            errors="coerce"
+        )
+
+        X_test[col] = pd.to_numeric(
+            X_test[col],
+            errors="coerce"
+        )
+
+
+# ------------------------------------------------------------
+# 10. HANDLE INFINITE VALUES
+# ------------------------------------------------------------
+
+X = X.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+X_test = X_test.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+
+# ------------------------------------------------------------
+# 11. HANDLE MISSING VALUES
+# ------------------------------------------------------------
+
+for col in X.columns:
+
+    median_value = X[col].median()
+
+    if pd.isna(median_value):
+        median_value = 0
+
+    X[col] = X[col].fillna(
+        median_value
+    )
+
+    X_test[col] = X_test[col].fillna(
+        median_value
+    )
+
+
+print("\nFinal training shape:")
+print(X.shape)
+
+print("\nFinal test shape:")
+print(X_test.shape)
+
+print("\nMissing values in training:")
+print(X.isna().sum().sum())
+
+print("Missing values in test:")
+print(X_test.isna().sum().sum())
+
+
+# ------------------------------------------------------------
+# 12. 5-FOLD CROSS-VALIDATION
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("5-FOLD CROSS-VALIDATION")
+print("=" * 70)
+
+skf = StratifiedKFold(
+    n_splits=N_SPLITS,
+    shuffle=True,
+    random_state=RANDOM_STATE
+)
+
+oof_predictions = np.zeros(
+    len(X),
+    dtype=np.float64
+)
+
+test_predictions = np.zeros(
+    len(X_test),
+    dtype=np.float64
+)
+
+fold_scores = []
+
+
+# ------------------------------------------------------------
+# 13. XGBOOST TRAINING
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("TRAINING XGBOOST MODELS")
+print("=" * 70)
+
+for fold, (train_idx, valid_idx) in enumerate(
+    skf.split(X, y),
+    start=1
+):
+
+    print(
+        f"\nTraining Fold "
+        f"{fold}/{N_SPLITS}..."
+    )
+
+    X_train_fold = X.iloc[train_idx]
+    X_valid_fold = X.iloc[valid_idx]
+
+    y_train_fold = y.iloc[train_idx]
+    y_valid_fold = y.iloc[valid_idx]
+
+
+    model = XGBClassifier(
+
+        n_estimators=1000,
+
+        learning_rate=0.035,
+
+        max_depth=6,
+
+        min_child_weight=3,
+
+        subsample=0.85,
+
+        colsample_bytree=0.85,
+
+        gamma=0.0,
+
+        reg_alpha=0.05,
+
+        reg_lambda=1.5,
+
+        objective="binary:logistic",
+
+        eval_metric="auc",
+
+        tree_method="hist",
+
+        random_state=RANDOM_STATE + fold,
+
+        n_jobs=-1,
+
+        verbosity=0
+    )
+
+
+    model.fit(
+        X_train_fold,
+        y_train_fold,
+
+        eval_set=[
+            (
+                X_valid_fold,
+                y_valid_fold
+            )
+        ],
+
+        verbose=False
+    )
+
+
+    # --------------------------------------------------------
+    # Validation predictions
+    # --------------------------------------------------------
+
+    valid_pred = model.predict_proba(
+        X_valid_fold
+    )[:, 1]
+
+
+    # --------------------------------------------------------
+    # Test predictions
+    # --------------------------------------------------------
+
+    test_pred = model.predict_proba(
+        X_test
+    )[:, 1]
+
+
+    # --------------------------------------------------------
+    # Store OOF predictions
+    # --------------------------------------------------------
+
+    oof_predictions[valid_idx] = valid_pred
+
+
+    # Average predictions across folds
+
+    test_predictions += (
+        test_pred / N_SPLITS
+    )
+
+
+    # --------------------------------------------------------
+    # Fold ROC-AUC
+    # --------------------------------------------------------
+
+    fold_auc = roc_auc_score(
+        y_valid_fold,
+        valid_pred
+    )
+
+    fold_scores.append(
+        fold_auc
+    )
+
+
+    print(
+        f"Fold {fold} ROC-AUC: "
+        f"{fold_auc:.6f}"
+    )
+
+
+# ------------------------------------------------------------
+# 14. OVERALL OOF RESULTS
+# ------------------------------------------------------------
+
+overall_auc = roc_auc_score(
+    y,
+    oof_predictions
+)
+
+mean_fold_auc = np.mean(
+    fold_scores
+)
+
+std_fold_auc = np.std(
+    fold_scores
+)
+
+accuracy = accuracy_score(
+    y,
+    (
+        oof_predictions >= 0.50
+    ).astype(int)
+)
+
+
+# ------------------------------------------------------------
+# 15. STAGE 6 RESULTS
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("STAGE 6 XGBOOST RESULTS")
+print("=" * 70)
+
+print(
+    f"\nOverall OOF ROC-AUC: "
+    f"{overall_auc:.6f}"
+)
+
+print(
+    f"Mean Fold ROC-AUC: "
+    f"{mean_fold_auc:.6f}"
+)
+
+print(
+    f"Fold ROC-AUC Std: "
+    f"{std_fold_auc:.6f}"
+)
+
+print(
+    f"Accuracy @ 0.50: "
+    f"{accuracy:.6f}"
+)
+
+
+# ------------------------------------------------------------
+# 16. COMPARE WITH STAGE 4 BENCHMARK
+# ------------------------------------------------------------
+
+STAGE4_AUC = 0.941392
+
+improvement = (
+    overall_auc
+    - STAGE4_AUC
+)
+
+print("\n" + "=" * 70)
+print("COMPARISON WITH STAGE 4")
+print("=" * 70)
+
+print(
+    f"\nStage 4 ROC-AUC : "
+    f"{STAGE4_AUC:.6f}"
+)
+
+print(
+    f"Stage 6 ROC-AUC : "
+    f"{overall_auc:.6f}"
+)
+
+print(
+    f"Difference      : "
+    f"{improvement:+.6f}"
+)
+
+
+if overall_auc > STAGE4_AUC:
+
+    print(
+        "\nStage 6 produced a higher ROC-AUC "
+        "than the Stage 4 benchmark."
+    )
+
+elif overall_auc < STAGE4_AUC:
+
+    print(
+        "\nStage 6 produced a lower ROC-AUC "
+        "than the Stage 4 benchmark."
+    )
+
+else:
+
+    print(
+        "\nStage 6 matched the Stage 4 benchmark."
+    )
+
+
+# ------------------------------------------------------------
+# 17. SAVE MODEL RESULTS
+# ------------------------------------------------------------
+
+results = pd.DataFrame({
+
+    "Model": [
+        "XGBoost_Stage6"
+    ],
+
+    "OOF_ROC_AUC": [
+        overall_auc
+    ],
+
+    "Mean_Fold_AUC": [
+        mean_fold_auc
+    ],
+
+    "Std_Fold_AUC": [
+        std_fold_auc
+    ],
+
+    "Accuracy": [
+        accuracy
+    ],
+
+    "Stage4_AUC": [
+        STAGE4_AUC
+    ],
+
+    "Difference_vs_Stage4": [
+        improvement
+    ]
+})
+
+
+results.to_csv(
+    "stage6_model_results.csv",
+    index=False
+)
+
+
+# ------------------------------------------------------------
+# 18. SAVE OOF PREDICTIONS
+# ------------------------------------------------------------
+
+oof_output = pd.DataFrame({
+
+    ID_COL:
+        train[ID_COL],
+
+    TARGET:
+        y,
+
+    "OOF_Prediction":
+        oof_predictions
+})
+
+
+oof_output.to_csv(
+    "stage6_oof_predictions.csv",
+    index=False
+)
+
+
+# ------------------------------------------------------------
+# 19. SAVE TEST PREDICTIONS
+# ------------------------------------------------------------
+
+test_output = pd.DataFrame({
+
+    ID_COL:
+        test[ID_COL],
+
+    "Prediction":
+        test_predictions
+})
+
+
+test_output.to_csv(
+    "stage6_test_predictions.csv",
+    index=False
+)
+
+
+# ------------------------------------------------------------
+# 20. OPTIONAL SUBMISSION FILE
+# ------------------------------------------------------------
+
+submission = pd.DataFrame({
+
+    ID_COL:
+        test[ID_COL],
+
+    TARGET:
+        np.where(
+            test_predictions >= 0.50,
+            "Yes",
+            "No"
+        )
+})
+
+
+submission.to_csv(
+    "submission_stage6_xgboost.csv",
+    index=False
+)
+
+
+# ------------------------------------------------------------
+# 21. PREDICTION DISTRIBUTION
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("TEST PREDICTION DISTRIBUTION")
+print("=" * 70)
+
+print(
+    submission[TARGET]
+    .value_counts()
+)
+
+print("\nPrediction percentages:")
+
+print(
+    submission[TARGET]
+    .value_counts(
+        normalize=True
+    )
+    .mul(100)
+    .round(2)
+)
+
+
+# ------------------------------------------------------------
+# 22. COMPLETE
+# ------------------------------------------------------------
+
+print("\n" + "=" * 70)
+print("STAGE 6 COMPLETE")
+print("=" * 70)
+
+print(
+    f"\nStage 6 XGBoost OOF ROC-AUC: "
+    f"{overall_auc:.6f}"
+)
+
+print(
+    f"Stage 4 benchmark: "
+    f"{STAGE4_AUC:.6f}"
+)
+
+print(
+    f"Difference vs Stage 4: "
+    f"{improvement:+.6f}"
+)
+
+print("\nFiles saved:")
+
+print(
+    " - stage6_model_results.csv"
+)
+
+print(
+    " - stage6_oof_predictions.csv"
+)
+
+print(
+    " - stage6_test_predictions.csv"
+)
+
+print(
+    " - submission_stage6_xgboost.csv"
+)
