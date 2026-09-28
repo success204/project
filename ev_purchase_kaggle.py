@@ -5572,3 +5572,621 @@ print("\nDO NOT CREATE THE FINAL SUBMISSION FROM STAGE 10 YET.")
 print("Review the results first.")
 
 print("=" * 70)
+
+
+# ======================================================================
+# STAGE 11 — FEATURE SET COMPARISON
+# ======================================================================
+
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score
+)
+
+from xgboost import XGBClassifier
+
+
+print("\n" + "=" * 70)
+print("STAGE 11 — FEATURE SET COMPARISON")
+print("=" * 70)
+
+
+# ======================================================================
+# 1. LOAD DATA
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train = pd.read_csv("./train.csv")
+
+print("Train shape:", train.shape)
+
+
+# ======================================================================
+# 2. PREPARE TARGET
+# ======================================================================
+
+target_column = "Will_Buy_EV"
+
+y = train[target_column].map({
+    "No": 0,
+    "Yes": 1
+})
+
+X = train.drop(columns=[target_column])
+
+
+# Remove ID
+id_columns = [col for col in X.columns if col.lower() == "id"]
+
+if id_columns:
+    print("Removing ID column:", id_columns)
+    X = X.drop(columns=id_columns)
+
+
+print("Original features:", X.shape[1])
+
+
+# ======================================================================
+# 3. CREATE ORIGINAL ENCODED FEATURES
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("CREATING ORIGINAL FEATURE SET")
+print("=" * 70)
+
+X_original = X.copy()
+
+categorical_original = X_original.select_dtypes(
+    include=["object", "category", "str"]
+).columns.tolist()
+
+print("Categorical columns:", categorical_original)
+
+X_original_encoded = pd.get_dummies(
+    X_original,
+    columns=categorical_original,
+    dummy_na=True
+)
+
+X_original_encoded = X_original_encoded.astype(float)
+
+print(
+    "Original encoded feature count:",
+    X_original_encoded.shape[1]
+)
+
+
+# ======================================================================
+# 4. CREATE ENGINEERED FEATURES
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("CREATING ENGINEERED FEATURES")
+print("=" * 70)
+
+X_engineered = X.copy()
+
+
+# ----------------------------------------------------------------------
+# Digit decomposition
+# ----------------------------------------------------------------------
+
+numeric_columns = [
+    "Age",
+    "Annual_Income_USD",
+    "Daily_Commute_km",
+    "Charging_Stations_Near_Home",
+    "Charging_Stations_Near_Work",
+    "Number_of_Cars_Owned"
+]
+
+for col in numeric_columns:
+
+    if col in X_engineered.columns:
+
+        X_engineered[f"{col}_units"] = X_engineered[col] % 10
+
+        X_engineered[f"{col}_tens"] = (
+            X_engineered[col] // 10
+        ) % 10
+
+        X_engineered[f"{col}_hundreds"] = (
+            X_engineered[col] // 100
+        ) % 10
+
+        X_engineered[f"{col}_thousands"] = (
+            X_engineered[col] // 1000
+        ) % 10
+
+        X_engineered[f"{col}_ten_thousands"] = (
+            X_engineered[col] // 10000
+        ) % 10
+
+
+# ----------------------------------------------------------------------
+# Subsidy / income interaction
+# ----------------------------------------------------------------------
+
+if (
+    "Subsidy_Available" in X_engineered.columns
+    and "Annual_Income_USD" in X_engineered.columns
+):
+
+    subsidy_numeric = (
+        X_engineered["Subsidy_Available"]
+        .map({"Yes": 1, "No": 0})
+        .fillna(0)
+    )
+
+    X_engineered["Subsidy_Income"] = (
+        subsidy_numeric *
+        X_engineered["Annual_Income_USD"]
+    )
+
+
+# ----------------------------------------------------------------------
+# Total charging stations
+# ----------------------------------------------------------------------
+
+if (
+    "Charging_Stations_Near_Home" in X_engineered.columns
+    and "Charging_Stations_Near_Work" in X_engineered.columns
+):
+
+    X_engineered["Total_Charging_Stations"] = (
+        X_engineered["Charging_Stations_Near_Home"]
+        + X_engineered["Charging_Stations_Near_Work"]
+    )
+
+
+# ----------------------------------------------------------------------
+# Charging station gap
+# ----------------------------------------------------------------------
+
+if (
+    "Charging_Stations_Near_Home" in X_engineered.columns
+    and "Charging_Stations_Near_Work" in X_engineered.columns
+):
+
+    X_engineered["Charging_Station_Gap"] = (
+        X_engineered["Charging_Stations_Near_Home"]
+        - X_engineered["Charging_Stations_Near_Work"]
+    )
+
+
+# ----------------------------------------------------------------------
+# Range anxiety × commute
+# ----------------------------------------------------------------------
+
+if (
+    "Range_Anxiety_Level" in X_engineered.columns
+    and "Daily_Commute_km" in X_engineered.columns
+):
+
+    anxiety_numeric = (
+        X_engineered["Range_Anxiety_Level"]
+        .map({
+            "Low": 1,
+            "Medium": 2,
+            "High": 3
+        })
+        .fillna(0)
+    )
+
+    X_engineered["Range_Anxiety_Commute"] = (
+        anxiety_numeric *
+        X_engineered["Daily_Commute_km"]
+    )
+
+
+# ======================================================================
+# 5. ONE-HOT ENCODE ALL ENGINEERED FEATURES
+# ======================================================================
+
+categorical_engineered = X_engineered.select_dtypes(
+    include=["object", "category", "str"]
+).columns.tolist()
+
+X_engineered_encoded = pd.get_dummies(
+    X_engineered,
+    columns=categorical_engineered,
+    dummy_na=True
+)
+
+X_engineered_encoded = X_engineered_encoded.astype(float)
+
+print(
+    "All engineered encoded feature count:",
+    X_engineered_encoded.shape[1]
+)
+
+
+# ======================================================================
+# 6. SELECT ENGINEERED FEATURES
+# ======================================================================
+
+selected_engineered_features = [
+    "Subsidy_Income",
+    "Total_Charging_Stations",
+    "Charging_Station_Gap",
+    "Range_Anxiety_Commute",
+    "Annual_Income_USD_ten_thousands",
+    "Annual_Income_USD_hundreds",
+    "Annual_Income_USD_thousands",
+    "Daily_Commute_km_tens",
+    "Age_units"
+]
+
+
+print("\nSelected engineered features:")
+
+for feature in selected_engineered_features:
+    print(" -", feature)
+
+
+# Make sure all selected features exist
+missing_selected = [
+    feature
+    for feature in selected_engineered_features
+    if feature not in X_engineered_encoded.columns
+]
+
+if missing_selected:
+    raise ValueError(
+        f"Missing selected engineered features: {missing_selected}"
+    )
+
+
+# ----------------------------------------------------------------------
+# Original features + selected engineered features
+# ----------------------------------------------------------------------
+
+original_columns = list(X_original_encoded.columns)
+
+selected_columns = (
+    original_columns
+    + selected_engineered_features
+)
+
+# Remove accidental duplicates while preserving order
+selected_columns = list(dict.fromkeys(selected_columns))
+
+X_selected_encoded = X_engineered_encoded[
+    selected_columns
+].copy()
+
+
+# ======================================================================
+# 7. CHECK FEATURE COUNTS
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("FEATURE SET SIZES")
+print("=" * 70)
+
+print(
+    "Original features:",
+    X_original_encoded.shape[1]
+)
+
+print(
+    "All engineered features:",
+    X_engineered_encoded.shape[1]
+)
+
+print(
+    "Selected engineered features:",
+    X_selected_encoded.shape[1]
+)
+
+
+# Expected:
+# Original = 30
+# All = 64
+# Selected = 39
+
+if X_original_encoded.shape[1] != 30:
+    print(
+        "\nWARNING: Original feature count is not 30."
+    )
+
+if X_engineered_encoded.shape[1] != 64:
+    print(
+        "\nWARNING: Engineered feature count is not 64."
+    )
+
+if X_selected_encoded.shape[1] != 39:
+    print(
+        "\nWARNING: Selected feature count is not 39."
+    )
+
+
+# ======================================================================
+# 8. VALIDATION SPLIT
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("CREATING VALIDATION SPLIT")
+print("=" * 70)
+
+train_indices, validation_indices = train_test_split(
+    np.arange(len(y)),
+    test_size=0.20,
+    stratify=y,
+    random_state=42
+)
+
+print(
+    "Training rows:",
+    len(train_indices)
+)
+
+print(
+    "Validation rows:",
+    len(validation_indices)
+)
+
+
+# ======================================================================
+# 9. MODEL FUNCTION
+# ======================================================================
+
+scale_positive_weight = (
+    (y == 0).sum() /
+    (y == 1).sum()
+)
+
+print(
+    "\nScale positive weight:",
+    round(scale_positive_weight, 4)
+)
+
+
+def evaluate_feature_set(name, X_data):
+
+    print("\n" + "-" * 70)
+    print(f"MODEL: {name}")
+    print("-" * 70)
+
+    X_train = X_data.iloc[train_indices]
+    X_valid = X_data.iloc[validation_indices]
+
+    y_train = y.iloc[train_indices]
+    y_valid = y.iloc[validation_indices]
+
+    print(
+        "Training shape:",
+        X_train.shape
+    )
+
+    print(
+        "Validation shape:",
+        X_valid.shape
+    )
+
+    model = XGBClassifier(
+        n_estimators=500,
+        learning_rate=0.03,
+        max_depth=5,
+        min_child_weight=5,
+        subsample=0.85,
+        colsample_bytree=0.85,
+        gamma=0.1,
+        reg_alpha=0.1,
+        reg_lambda=2.0,
+        scale_pos_weight=scale_positive_weight,
+        objective="binary:logistic",
+        eval_metric="logloss",
+        tree_method="hist",
+        random_state=42,
+        n_jobs=-1
+    )
+
+    model.fit(
+        X_train,
+        y_train
+    )
+
+    predictions = model.predict_proba(
+        X_valid
+    )[:, 1]
+
+    predicted_classes = (
+        predictions >= 0.5
+    ).astype(int)
+
+    accuracy = accuracy_score(
+        y_valid,
+        predicted_classes
+    )
+
+    precision = precision_score(
+        y_valid,
+        predicted_classes,
+        zero_division=0
+    )
+
+    recall = recall_score(
+        y_valid,
+        predicted_classes,
+        zero_division=0
+    )
+
+    f1 = f1_score(
+        y_valid,
+        predicted_classes,
+        zero_division=0
+    )
+
+    roc_auc = roc_auc_score(
+        y_valid,
+        predictions
+    )
+
+    print("\nMetrics:")
+
+    print(
+        f"Accuracy : {accuracy:.6f}"
+    )
+
+    print(
+        f"Precision: {precision:.6f}"
+    )
+
+    print(
+        f"Recall   : {recall:.6f}"
+    )
+
+    print(
+        f"F1 Score : {f1:.6f}"
+    )
+
+    print(
+        f"ROC-AUC  : {roc_auc:.6f}"
+    )
+
+    return {
+        "Model": name,
+        "Features": X_data.shape[1],
+        "Accuracy": accuracy,
+        "Precision": precision,
+        "Recall": recall,
+        "F1": f1,
+        "ROC-AUC": roc_auc
+    }
+
+
+# ======================================================================
+# 10. RUN THREE FEATURE SET EXPERIMENTS
+# ======================================================================
+
+results = []
+
+
+# ----------------------------------------------------------------------
+# Original features
+# ----------------------------------------------------------------------
+
+results.append(
+    evaluate_feature_set(
+        "Original_No_ID",
+        X_original_encoded
+    )
+)
+
+
+# ----------------------------------------------------------------------
+# All engineered features
+# ----------------------------------------------------------------------
+
+results.append(
+    evaluate_feature_set(
+        "All_Engineered_No_ID",
+        X_engineered_encoded
+    )
+)
+
+
+# ----------------------------------------------------------------------
+# Selected engineered features
+# ----------------------------------------------------------------------
+
+results.append(
+    evaluate_feature_set(
+        "Selected_Engineered_No_ID",
+        X_selected_encoded
+    )
+)
+
+
+# ======================================================================
+# 11. MODEL COMPARISON
+# ======================================================================
+
+comparison = pd.DataFrame(results)
+
+comparison = comparison.sort_values(
+    by="ROC-AUC",
+    ascending=False
+).reset_index(drop=True)
+
+
+print("\n" + "=" * 70)
+print("STAGE 11 MODEL COMPARISON")
+print("=" * 70)
+
+print(
+    comparison.to_string(index=False)
+)
+
+
+# ======================================================================
+# 12. SAVE RESULTS
+# ======================================================================
+
+comparison.to_csv(
+    "stage11_model_comparison.csv",
+    index=False
+)
+
+
+# ======================================================================
+# 13. COMPARE AGAINST STAGE 10
+# ======================================================================
+
+stage10_auc = 0.942477
+
+best_stage11_auc = comparison.loc[
+    0,
+    "ROC-AUC"
+]
+
+improvement = (
+    best_stage11_auc -
+    stage10_auc
+)
+
+print("\n" + "=" * 70)
+print("COMPARISON WITH STAGE 10")
+print("=" * 70)
+
+print(
+    f"Stage 10 ROC-AUC : {stage10_auc:.6f}"
+)
+
+print(
+    f"Stage 11 ROC-AUC : {best_stage11_auc:.6f}"
+)
+
+print(
+    f"Difference       : {improvement:+.6f}"
+)
+
+
+# ======================================================================
+# 14. FINAL STATUS
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("STAGE 11 COMPLETE")
+print("=" * 70)
+
+print(
+    "\nResults saved to:"
+)
+
+print(
+    "stage11_model_comparison.csv"
+)
+
+print("\nUse ROC-AUC as the primary comparison metric.")
