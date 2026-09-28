@@ -5117,3 +5117,458 @@ print("Submission file   :", submission_path)
 
 
 print("=" * 70)
+
+# ======================================================================
+# STAGE 10 — FEATURE ENGINEERING VALIDATION
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("STAGE 10 — FEATURE ENGINEERING VALIDATION")
+print("=" * 70)
+
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score
+)
+
+from xgboost import XGBClassifier
+
+
+# ======================================================================
+# 1. LOAD DATA
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train = pd.read_csv("train.csv")
+
+print("Train shape:", train.shape)
+
+
+# ======================================================================
+# 2. TARGET
+# ======================================================================
+
+TARGET = "Will_Buy_EV"
+ID_COLUMN = "id"
+
+y = train[TARGET].map({
+    "No": 0,
+    "Yes": 1
+})
+
+X = train.drop(columns=[TARGET]).copy()
+
+if ID_COLUMN in X.columns:
+    X = X.drop(columns=[ID_COLUMN])
+
+print("\nTarget distribution:")
+print(train[TARGET].value_counts())
+
+
+# ======================================================================
+# 3. FEATURE ENGINEERING FUNCTION
+# ======================================================================
+
+def create_features(df):
+
+    df = df.copy()
+
+    # --------------------------------------------------------------
+    # DIGIT DECOMPOSITION
+    # --------------------------------------------------------------
+
+    numeric_columns = [
+        "Age",
+        "Annual_Income_USD",
+        "Daily_Commute_km",
+        "Charging_Stations_Near_Home",
+        "Charging_Stations_Near_Work",
+        "Number_of_Cars_Owned"
+    ]
+
+    for column in numeric_columns:
+
+        if column in df.columns:
+
+            values = pd.to_numeric(
+                df[column],
+                errors="coerce"
+            ).fillna(0)
+
+            values = values.astype(int).abs()
+
+            df[column + "_units"] = values % 10
+            df[column + "_tens"] = (values // 10) % 10
+            df[column + "_hundreds"] = (values // 100) % 10
+            df[column + "_thousands"] = (values // 1000) % 10
+            df[column + "_ten_thousands"] = (
+                (values // 10000) % 10
+            )
+
+    # --------------------------------------------------------------
+    # SELECTED INTERACTION FEATURES
+    # --------------------------------------------------------------
+
+    if {
+        "Annual_Income_USD",
+        "Subsidy_Available"
+    }.issubset(df.columns):
+
+        subsidy_numeric = (
+            df["Subsidy_Available"]
+            .map({"Yes": 1, "No": 0})
+            .fillna(
+                pd.to_numeric(
+                    df["Subsidy_Available"],
+                    errors="coerce"
+                )
+            )
+            .fillna(0)
+        )
+
+        df["Subsidy_Income"] = (
+            df["Annual_Income_USD"] *
+            subsidy_numeric
+        )
+
+    if {
+        "Charging_Stations_Near_Home",
+        "Charging_Stations_Near_Work"
+    }.issubset(df.columns):
+
+        df["Total_Charging_Stations"] = (
+            df["Charging_Stations_Near_Home"] +
+            df["Charging_Stations_Near_Work"]
+        )
+
+        df["Charging_Station_Gap"] = (
+            df["Charging_Stations_Near_Work"] -
+            df["Charging_Stations_Near_Home"]
+        )
+
+    if {
+        "Daily_Commute_km",
+        "Range_Anxiety_Level"
+    }.issubset(df.columns):
+
+        range_anxiety_numeric = (
+            df["Range_Anxiety_Level"]
+            .map({
+                "Low": 0,
+                "Medium": 1,
+                "High": 2
+            })
+        )
+
+        if range_anxiety_numeric.notna().sum() == 0:
+            range_anxiety_numeric = pd.to_numeric(
+                df["Range_Anxiety_Level"],
+                errors="coerce"
+            )
+
+        range_anxiety_numeric = (
+            range_anxiety_numeric.fillna(0)
+        )
+
+        df["Range_Anxiety_Commute"] = (
+            df["Daily_Commute_km"] *
+            range_anxiety_numeric
+        )
+
+    return df
+
+
+# ======================================================================
+# 4. CREATE ENGINEERED FEATURES
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("CREATING ENGINEERED FEATURES")
+print("=" * 70)
+
+X_engineered = create_features(X)
+
+print("Original feature count :", X.shape[1])
+print("Engineered feature count:", X_engineered.shape[1])
+
+print("\nNew features:")
+new_features = [
+    column
+    for column in X_engineered.columns
+    if column not in X.columns
+]
+
+print(new_features)
+
+
+# ======================================================================
+# 5. CONSISTENT ENCODING
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("ENCODING FEATURES")
+print("=" * 70)
+
+categorical_columns = X_engineered.select_dtypes(
+    include=["object", "category", "str"]
+).columns.tolist()
+
+print("Categorical columns:")
+print(categorical_columns)
+
+X_encoded = pd.get_dummies(
+    X_engineered,
+    columns=categorical_columns,
+    dummy_na=True
+)
+
+for column in X_encoded.columns:
+
+    if X_encoded[column].dtype == bool:
+
+        X_encoded[column] = (
+            X_encoded[column].astype(int)
+        )
+
+X_encoded = X_encoded.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+for column in X_encoded.columns:
+
+    if X_encoded[column].isna().any():
+
+        median_value = X_encoded[column].median()
+
+        if pd.isna(median_value):
+            median_value = 0
+
+        X_encoded[column] = (
+            X_encoded[column].fillna(median_value)
+        )
+
+print("\nEncoded feature shape:")
+print(X_encoded.shape)
+
+print(
+    "Missing values:",
+    X_encoded.isna().sum().sum()
+)
+
+
+# ======================================================================
+# 6. VALIDATION SPLIT
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("CREATING VALIDATION SPLIT")
+print("=" * 70)
+
+X_train, X_valid, y_train, y_valid = train_test_split(
+    X_encoded,
+    y,
+    test_size=0.20,
+    stratify=y,
+    random_state=42
+)
+
+print("Training rows  :", len(X_train))
+print("Validation rows:", len(X_valid))
+
+
+# ======================================================================
+# 7. CLASS BALANCING
+# ======================================================================
+
+negative_count = (y_train == 0).sum()
+positive_count = (y_train == 1).sum()
+
+scale_pos_weight = (
+    negative_count / positive_count
+)
+
+print("\nScale positive weight:",
+      round(scale_pos_weight, 4))
+
+
+# ======================================================================
+# 8. BASELINE MODEL
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("TRAINING BASELINE MODEL")
+print("=" * 70)
+
+baseline_model = XGBClassifier(
+    n_estimators=500,
+    learning_rate=0.03,
+    max_depth=5,
+    min_child_weight=5,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    gamma=0.1,
+    reg_alpha=0.1,
+    reg_lambda=2.0,
+    scale_pos_weight=scale_pos_weight,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    tree_method="hist",
+    random_state=42,
+    n_jobs=-1
+)
+
+baseline_model.fit(
+    X_train,
+    y_train
+)
+
+baseline_probabilities = (
+    baseline_model.predict_proba(X_valid)[:, 1]
+)
+
+baseline_predictions = (
+    baseline_probabilities >= 0.5
+).astype(int)
+
+
+# ======================================================================
+# 9. EVALUATION
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("STAGE 10 RESULTS")
+print("=" * 70)
+
+accuracy = accuracy_score(
+    y_valid,
+    baseline_predictions
+)
+
+precision = precision_score(
+    y_valid,
+    baseline_predictions,
+    zero_division=0
+)
+
+recall = recall_score(
+    y_valid,
+    baseline_predictions,
+    zero_division=0
+)
+
+f1 = f1_score(
+    y_valid,
+    baseline_predictions,
+    zero_division=0
+)
+
+roc_auc = roc_auc_score(
+    y_valid,
+    baseline_probabilities
+)
+
+print("\nAccuracy :", round(accuracy, 6))
+print("Precision:", round(precision, 6))
+print("Recall   :", round(recall, 6))
+print("F1 Score :", round(f1, 6))
+print("ROC-AUC  :", round(roc_auc, 6))
+
+
+# ======================================================================
+# 10. COMPARISON WITH STAGE 8
+# ======================================================================
+
+stage8_auc = 0.941534
+
+difference = roc_auc - stage8_auc
+
+print("\n" + "=" * 70)
+print("COMPARISON AGAINST STAGE 8")
+print("=" * 70)
+
+print("Stage 8 ROC-AUC :", round(stage8_auc, 6))
+print("Stage 10 ROC-AUC:", round(roc_auc, 6))
+print("Difference      :", f"{difference:+.6f}")
+
+
+# ======================================================================
+# 11. FEATURE IMPORTANCE
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("TOP FEATURE IMPORTANCE")
+print("=" * 70)
+
+importance = pd.DataFrame({
+    "Feature": X_encoded.columns,
+    "Importance": baseline_model.feature_importances_
+})
+
+importance = importance.sort_values(
+    "Importance",
+    ascending=False
+)
+
+print(
+    importance.head(20).to_string(index=False)
+)
+
+importance.to_csv(
+    "stage10_feature_importance.csv",
+    index=False
+)
+
+
+# ======================================================================
+# 12. SAVE RESULTS
+# ======================================================================
+
+results = pd.DataFrame({
+    "Model": ["Stage10_Engineered_XGBoost"],
+    "Features": [X_encoded.shape[1]],
+    "Accuracy": [accuracy],
+    "Precision": [precision],
+    "Recall": [recall],
+    "F1": [f1],
+    "ROC_AUC": [roc_auc],
+    "Stage8_ROC_AUC": [stage8_auc],
+    "Difference": [difference]
+})
+
+results.to_csv(
+    "stage10_model_comparison.csv",
+    index=False
+)
+
+
+# ======================================================================
+# STAGE 10 COMPLETE
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("STAGE 10 COMPLETE")
+print("=" * 70)
+
+print("Stage 10 ROC-AUC:", round(roc_auc, 6))
+print("Stage 8 ROC-AUC :", round(stage8_auc, 6))
+print("Difference     :", f"{difference:+.6f}")
+
+print("\nFiles created:")
+print(" - stage10_model_comparison.csv")
+print(" - stage10_feature_importance.csv")
+
+print("\nDO NOT CREATE THE FINAL SUBMISSION FROM STAGE 10 YET.")
+print("Review the results first.")
+
+print("=" * 70)
