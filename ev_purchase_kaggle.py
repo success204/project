@@ -4761,3 +4761,359 @@ print(
 )
 
 print("=" * 70)
+
+
+# ======================================================================
+# STAGE 9 — FINAL XGBOOST MODEL TRAINING & PREDICTION
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("STAGE 9 — FINAL XGBOOST MODEL TRAINING & PREDICTION")
+print("=" * 70)
+
+import os
+import numpy as np
+import pandas as pd
+from xgboost import XGBClassifier
+
+
+# ======================================================================
+# 1. LOAD DATA
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+# Automatically find train/test files
+possible_paths = [
+    ".",
+    "data",
+    "dataset",
+    "input"
+]
+
+train_path = None
+test_path = None
+
+for path in possible_paths:
+    train_candidate = os.path.join(path, "train.csv")
+    test_candidate = os.path.join(path, "test.csv")
+
+    if os.path.exists(train_candidate) and os.path.exists(test_candidate):
+        train_path = train_candidate
+        test_path = test_candidate
+        break
+
+if train_path is None:
+    raise FileNotFoundError(
+        "Could not find train.csv and test.csv. "
+        "Place them in the project folder or update the file paths."
+    )
+
+print("Train file:", train_path)
+print("Test file :", test_path)
+
+train = pd.read_csv(train_path)
+test = pd.read_csv(test_path)
+
+print("Train shape:", train.shape)
+print("Test shape :", test.shape)
+
+
+# ======================================================================
+# 2. TARGET
+# ======================================================================
+
+TARGET = "Will_Buy_EV"
+ID_COLUMN = "id"
+
+if TARGET not in train.columns:
+    raise ValueError(f"Target column '{TARGET}' was not found.")
+
+y = train[TARGET].map({
+    "No": 0,
+    "Yes": 1
+})
+
+if y.isna().any():
+    raise ValueError("Unexpected values found in Will_Buy_EV.")
+
+print("\nTarget distribution:")
+print(train[TARGET].value_counts())
+
+print("\nTarget mapping:")
+print({"No": 0, "Yes": 1})
+
+
+# ======================================================================
+# 3. PREPARE FEATURES
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("PREPARING FINAL FEATURES")
+print("=" * 70)
+
+# Remove target
+X = train.drop(columns=[TARGET]).copy()
+X_test = test.copy()
+
+# Remove ID because Stage 8 showed that the selected model
+# is Regularized_No_ID.
+if ID_COLUMN in X.columns:
+    X = X.drop(columns=[ID_COLUMN])
+
+if ID_COLUMN in X_test.columns:
+    X_test = X_test.drop(columns=[ID_COLUMN])
+
+print("Training features:", X.shape)
+print("Test features    :", X_test.shape)
+
+
+# ======================================================================
+# 4. COMBINE DATA FOR CONSISTENT ENCODING
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("ENCODING FEATURES")
+print("=" * 70)
+
+# Combine train and test temporarily so categorical columns receive
+# exactly the same one-hot columns.
+combined = pd.concat(
+    [X, X_test],
+    axis=0,
+    ignore_index=True
+)
+
+categorical_columns = combined.select_dtypes(
+    include=["object", "category"]
+).columns.tolist()
+
+print("Categorical columns:")
+print(categorical_columns)
+
+# One-hot encode categorical variables
+combined = pd.get_dummies(
+    combined,
+    columns=categorical_columns,
+    dummy_na=True
+)
+
+# Convert boolean columns to integers
+for column in combined.columns:
+    if combined[column].dtype == bool:
+        combined[column] = combined[column].astype(int)
+
+# Replace infinite values
+combined = combined.replace(
+    [np.inf, -np.inf],
+    np.nan
+)
+
+# Fill missing values using median calculated from the combined data.
+# This guarantees that train and test have no missing values.
+for column in combined.columns:
+    if combined[column].isna().any():
+        median_value = combined[column].median()
+
+        if pd.isna(median_value):
+            median_value = 0
+
+        combined[column] = combined[column].fillna(median_value)
+
+# Split back
+X_final = combined.iloc[:len(X)].copy()
+X_test_final = combined.iloc[len(X):].copy()
+
+print("\nFinal training shape:", X_final.shape)
+print("Final test shape    :", X_test_final.shape)
+
+print("Missing values in training:",
+      X_final.isna().sum().sum())
+
+print("Missing values in test:",
+      X_test_final.isna().sum().sum())
+
+
+# ======================================================================
+# 5. CLASS WEIGHT
+# ======================================================================
+
+negative_count = (y == 0).sum()
+positive_count = (y == 1).sum()
+
+scale_pos_weight = negative_count / positive_count
+
+print("\n" + "=" * 70)
+print("CLASS BALANCING")
+print("=" * 70)
+
+print("Negative class:", negative_count)
+print("Positive class:", positive_count)
+print(
+    "Scale positive weight:",
+    round(scale_pos_weight, 4)
+)
+
+
+# ======================================================================
+# 6. FINAL MODEL
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("FINAL MODEL CONFIGURATION")
+print("=" * 70)
+
+print("Selected model: Regularized_No_ID")
+
+# Stage 8 selected the regularized no-ID configuration.
+# These parameters are deliberately conservative to reduce overfitting.
+final_model = XGBClassifier(
+    n_estimators=500,
+    learning_rate=0.03,
+    max_depth=5,
+    min_child_weight=5,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    gamma=0.1,
+    reg_alpha=0.1,
+    reg_lambda=2.0,
+    scale_pos_weight=scale_pos_weight,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    tree_method="hist",
+    random_state=42,
+    n_jobs=-1
+)
+
+print(final_model)
+
+
+# ======================================================================
+# 7. TRAIN ON ALL TRAINING DATA
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("TRAINING FINAL MODEL")
+print("=" * 70)
+
+print("Training rows:", len(X_final))
+print("Training features:", X_final.shape[1])
+
+final_model.fit(
+    X_final,
+    y
+)
+
+print("\nFinal model training complete.")
+
+
+# ======================================================================
+# 8. GENERATE TEST PROBABILITIES
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("GENERATING TEST PREDICTIONS")
+print("=" * 70)
+
+test_probabilities = final_model.predict_proba(
+    X_test_final
+)[:, 1]
+
+print("Prediction count:", len(test_probabilities))
+
+print("\nPrediction statistics:")
+print("Minimum :", round(test_probabilities.min(), 6))
+print("Maximum :", round(test_probabilities.max(), 6))
+print("Mean    :", round(test_probabilities.mean(), 6))
+print("Median  :", round(np.median(test_probabilities), 6))
+
+
+# ======================================================================
+# 9. CREATE SUBMISSION FILE
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("CREATING KAGGLE SUBMISSION")
+print("=" * 70)
+
+submission = pd.DataFrame({
+    "id": test["id"],
+    TARGET: test_probabilities
+})
+
+submission_path = "stage9_submission.csv"
+
+submission.to_csv(
+    submission_path,
+    index=False
+)
+
+print("\nSubmission created:")
+print(submission_path)
+
+print("\nSubmission shape:")
+print(submission.shape)
+
+print("\nSubmission columns:")
+print(submission.columns.tolist())
+
+print("\nFirst 10 predictions:")
+print(submission.head(10))
+
+print("\nPrediction range:")
+print(
+    submission[TARGET].min(),
+    "to",
+    submission[TARGET].max()
+)
+
+
+# ======================================================================
+# 10. VALIDATE SUBMISSION FORMAT
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("VALIDATING SUBMISSION")
+print("=" * 70)
+
+assert list(submission.columns) == [
+    "id",
+    "Will_Buy_EV"
+]
+
+assert len(submission) == len(test)
+
+assert submission["id"].equals(test["id"])
+
+assert submission["Will_Buy_EV"].notna().all()
+
+assert (
+    (submission["Will_Buy_EV"] >= 0) &
+    (submission["Will_Buy_EV"] <= 1)
+).all()
+
+print("Column check      : PASSED")
+print("Row count check   : PASSED")
+print("ID check          : PASSED")
+print("Missing values    : PASSED")
+print("Probability range : PASSED")
+
+
+# ======================================================================
+# STAGE 9 COMPLETE
+# ======================================================================
+
+print("\n" + "=" * 70)
+print("STAGE 9 COMPLETE")
+print("=" * 70)
+
+print("Final model       : Regularized_No_ID")
+print("Training rows     :", len(X_final))
+print("Final features    :", X_final.shape[1])
+print("Test predictions  :", len(test_probabilities))
+print("Submission file   :", submission_path)
+
+
+print("=" * 70)
