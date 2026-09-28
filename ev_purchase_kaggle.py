@@ -6190,3 +6190,319 @@ print(
 )
 
 print("\nUse ROC-AUC as the primary comparison metric.")
+
+
+# ================================================================
+# STAGE 12 — FINAL MODEL + KAGGLE PREDICTIONS
+# ================================================================
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.metrics import accuracy_score, classification_report, roc_auc_score
+from xgboost import XGBClassifier
+print("=" * 70)
+print("STAGE 12 — FINAL MODEL + KAGGLE PREDICTIONS")
+print("=" * 70)
+# ================================================================
+# 1. LOAD DATA
+# ================================================================
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+TRAIN_PATH = "train.csv"
+TEST_PATH = "test.csv"
+train = pd.read_csv(TRAIN_PATH)
+test = pd.read_csv(TEST_PATH)
+print(f"Train shape: {train.shape}")
+print(f"Test shape : {test.shape}")
+# ================================================================
+# 2. DEFINE TARGET AND REMOVE ID
+# ================================================================
+TARGET = "Will_Buy_EV"
+# Remove ID column if present
+id_columns = [col for col in train.columns if col.lower() == "id"]
+if id_columns:
+    print(f"Removing ID column: {id_columns}")
+    train = train.drop(columns=id_columns)
+    test = test.drop(columns=id_columns)
+X = train.drop(columns=[TARGET])
+y = train[TARGET]
+X_test = test.copy()
+print("\nFeatures:")
+print(list(X.columns))
+print(f"\nTarget: {TARGET}")
+# ================================================================
+# 3. DEFINE CATEGORICAL AND NUMERICAL FEATURES
+# ================================================================
+categorical_columns = X.select_dtypes(
+    include=["object", "string", "category"]
+).columns.tolist()
+numerical_columns = [
+    col for col in X.columns
+    if col not in categorical_columns
+]
+print("\nCategorical columns:")
+print(categorical_columns)
+print("\nNumerical columns:")
+print(numerical_columns)
+# ================================================================
+# 4. ENCODE CATEGORICAL FEATURES
+# ================================================================
+print("\n" + "=" * 70)
+print("ENCODING CATEGORICAL FEATURES")
+print("=" * 70)
+preprocessor = ColumnTransformer(
+    transformers=[
+        (
+            "categorical",
+            OneHotEncoder(
+                handle_unknown="ignore",
+                sparse_output=False
+            ),
+            categorical_columns
+        ),
+        (
+            "numerical",
+            "passthrough",
+            numerical_columns
+        )
+    ]
+)
+X_encoded = preprocessor.fit_transform(X)
+X_test_encoded = preprocessor.transform(X_test)
+print(f"Encoded feature count: {X_encoded.shape[1]}")
+# ================================================================
+# 5. ENCODE TARGET
+# ================================================================
+print("\n" + "=" * 70)
+print("ENCODING TARGET")
+print("=" * 70)
+# XGBoost requires numeric class labels.
+# No = 0
+# Yes = 1
+target_mapping = {
+    "No": 0,
+    "Yes": 1
+}
+y_encoded = y.map(target_mapping)
+# Check for unexpected target values
+if y_encoded.isna().any():
+    unexpected_values = y[y_encoded.isna()].unique()
+    raise ValueError(
+        f"Unexpected target values found: {unexpected_values}"
+    )
+y_encoded = y_encoded.astype(int)
+print("Target mapping:")
+print(target_mapping)
+print("\nEncoded target distribution:")
+print(
+    pd.Series(y_encoded)
+    .value_counts(normalize=True)
+    .sort_index()
+)
+# ================================================================
+# 6. CREATE VALIDATION SET
+# ================================================================
+print("\n" + "=" * 70)
+print("CREATING VALIDATION SET")
+print("=" * 70)
+X_train, X_val, y_train, y_val = train_test_split(
+    X_encoded,
+    y_encoded,
+    test_size=0.20,
+    random_state=42,
+    stratify=y_encoded
+)
+print(f"Training shape  : {X_train.shape}")
+print(f"Validation shape: {X_val.shape}")
+print("\nTraining target distribution:")
+print(
+    pd.Series(y_train)
+    .value_counts(normalize=True)
+    .sort_index()
+)
+print("\nValidation target distribution:")
+print(
+    pd.Series(y_val)
+    .value_counts(normalize=True)
+    .sort_index()
+)
+# ================================================================
+# 7. CALCULATE CLASS IMBALANCE
+# ================================================================
+negative_count = (y_train == 0).sum()
+positive_count = (y_train == 1).sum()
+scale_pos_weight = negative_count / positive_count
+print("\n" + "=" * 70)
+print("CLASS BALANCE")
+print("=" * 70)
+print(f"Negative samples: {negative_count}")
+print(f"Positive samples: {positive_count}")
+print(f"scale_pos_weight: {scale_pos_weight:.4f}")
+# ================================================================
+# 8. TRAIN XGBOOST MODEL
+# ================================================================
+print("\n" + "=" * 70)
+print("TRAINING XGBOOST MODEL")
+print("=" * 70)
+model = XGBClassifier(
+    n_estimators=500,
+    max_depth=6,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    # Handle the strong class imbalance
+    scale_pos_weight=scale_pos_weight,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    random_state=42,
+    n_jobs=-1,
+    tree_method="hist"
+)
+model.fit(
+    X_train,
+    y_train,
+    eval_set=[(X_val, y_val)],
+    verbose=False
+)
+print("XGBoost training completed.")
+# ================================================================
+# 9. VALIDATION EVALUATION
+# ================================================================
+print("\n" + "=" * 70)
+print("VALIDATION RESULTS")
+print("=" * 70)
+val_predictions = model.predict(X_val)
+val_probabilities = model.predict_proba(X_val)[:, 1]
+accuracy = accuracy_score(y_val, val_predictions)
+auc = roc_auc_score(y_val, val_probabilities)
+print(f"\nValidation Accuracy: {accuracy:.6f}")
+print(f"Validation ROC-AUC : {auc:.6f}")
+print("\nClassification Report:")
+print(
+    classification_report(
+        y_val,
+        val_predictions,
+        target_names=["No", "Yes"]
+    )
+)
+# ================================================================
+# 10. RETRAIN FINAL MODEL ON ALL TRAINING DATA
+# ================================================================
+print("\n" + "=" * 70)
+print("RETRAINING FINAL MODEL ON ALL TRAINING DATA")
+print("=" * 70)
+final_model = XGBClassifier(
+    n_estimators=500,
+    max_depth=6,
+    learning_rate=0.05,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=scale_pos_weight,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    random_state=42,
+    n_jobs=-1,
+    tree_method="hist"
+)
+final_model.fit(
+    X_encoded,
+    y_encoded,
+    verbose=False
+)
+print("Final model training completed.")
+# ================================================================
+# 11. GENERATE TEST PREDICTIONS
+# ================================================================
+print("\n" + "=" * 70)
+print("GENERATING KAGGLE PREDICTIONS")
+print("=" * 70)
+test_predictions_numeric = final_model.predict(X_test_encoded)
+# Convert:
+# 0 -> No
+# 1 -> Yes
+test_predictions = pd.Series(
+    test_predictions_numeric
+).map({
+    0: "No",
+    1: "Yes"
+})
+# ================================================================
+# 12. CHECK PREDICTIONS
+# ================================================================
+print("\nPrediction distribution:")
+print(
+    test_predictions.value_counts()
+)
+print("\nPrediction percentages:")
+print(
+    test_predictions.value_counts(normalize=True)
+)
+# ================================================================
+# 13. CREATE KAGGLE SUBMISSION
+# ================================================================
+print("\n" + "=" * 70)
+print("CREATING KAGGLE SUBMISSION")
+print("=" * 70)
+# Kaggle submission format:
+# ID column + target column
+submission = pd.DataFrame()
+# If the original test data had an ID column,
+# recreate it from the original test file.
+original_test = pd.read_csv(TEST_PATH)
+original_id_columns = [
+    col for col in original_test.columns
+    if col.lower() == "id"
+]
+if original_id_columns:
+    id_column = original_id_columns[0]
+    submission[id_column] = original_test[id_column].values
+else:
+    print(
+        "WARNING: No ID column found in test.csv. "
+        "Creating submission with target only."
+    )
+submission[TARGET] = test_predictions.values
+# ================================================================
+# 14. SAVE SUBMISSION
+# ================================================================
+SUBMISSION_PATH = "submission.csv"
+submission.to_csv(
+    SUBMISSION_PATH,
+    index=False
+)
+print(f"\nSubmission saved to: {SUBMISSION_PATH}")
+print("\nSubmission shape:")
+print(submission.shape)
+print("\nFirst 10 submission rows:")
+print(submission.head(10))
+print("\nSubmission columns:")
+print(list(submission.columns))
+# ================================================================
+# 15. FINAL CHECK
+# ================================================================
+print("\n" + "=" * 70)
+print("FINAL CHECK")
+print("=" * 70)
+print(f"Expected test rows : {len(test)}")
+print(f"Submission rows    : {len(submission)}")
+if len(submission) == len(test):
+    print("✓ Row count is correct.")
+else:
+    print("✗ WARNING: Submission row count does not match test data.")
+if TARGET in submission.columns:
+    print(f"✓ Target column '{TARGET}' is present.")
+else:
+    print(f"✗ WARNING: Target column '{TARGET}' is missing.")
+if original_id_columns:
+    if id_column in submission.columns:
+        print(f"✓ ID column '{id_column}' is present.")
+    else:
+        print(f"✗ WARNING: ID column '{id_column}' is missing.")
+print("\n" + "=" * 70)
+print("STAGE 12 COMPLETE")
+print("=" * 70)
+print("\nYour Kaggle submission file is:")
+print(SUBMISSION_PATH)
