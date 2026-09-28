@@ -3831,3 +3831,933 @@ print(
 )
 
 print("=" * 70)
+
+
+# ============================================================
+# STAGE 8 — XGBOOST OPTIMIZATION & FEATURE VALIDATION
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 8 — XGBOOST OPTIMIZATION & FEATURE VALIDATION")
+print("=" * 70)
+
+
+# ============================================================
+# 1. IMPORTS
+# ============================================================
+
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OrdinalEncoder
+
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+    classification_report
+)
+
+from xgboost import XGBClassifier
+
+
+# ============================================================
+# 2. FILES AND TARGET
+# ============================================================
+
+TRAIN_FILE = "train.csv"
+TEST_FILE = "test.csv"
+
+TARGET = "Will_Buy_EV"
+
+RANDOM_STATE = 42
+
+
+# ============================================================
+# 3. LOAD DATA
+# ============================================================
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train_data = pd.read_csv(TRAIN_FILE)
+test_data = pd.read_csv(TEST_FILE)
+
+print(f"Train shape: {train_data.shape}")
+print(f"Test shape : {test_data.shape}")
+
+
+# ============================================================
+# 4. TARGET CHECK
+# ============================================================
+
+if TARGET not in train_data.columns:
+    raise ValueError(
+        f"Target column '{TARGET}' was not found."
+    )
+
+print("\nTarget distribution:")
+print(train_data[TARGET].value_counts())
+
+
+# ============================================================
+# 5. SEPARATE FEATURES AND TARGET
+# ============================================================
+
+X_original = train_data.drop(
+    columns=[TARGET]
+).copy()
+
+y = train_data[TARGET].copy()
+
+X_test_original = test_data.copy()
+
+
+# ============================================================
+# 6. REMOVE UNNAMED INDEX COLUMNS
+# ============================================================
+
+unnamed_columns = [
+    column
+    for column in X_original.columns
+    if str(column).lower().startswith("unnamed:")
+]
+
+if unnamed_columns:
+
+    print("\nRemoving unnamed columns:")
+    print(unnamed_columns)
+
+    X_original = X_original.drop(
+        columns=unnamed_columns
+    )
+
+    X_test_original = X_test_original.drop(
+        columns=[
+            column
+            for column in unnamed_columns
+            if column in X_test_original.columns
+        ]
+    )
+
+
+# ============================================================
+# 7. CHECK FOR ID COLUMN
+# ============================================================
+
+id_columns = [
+    column
+    for column in X_original.columns
+    if str(column).lower() == "id"
+]
+
+print("\nID columns detected:")
+print(id_columns)
+
+
+# ============================================================
+# 8. TARGET ENCODING
+# ============================================================
+
+target_values = sorted(
+    y.unique()
+)
+
+if len(target_values) != 2:
+    raise ValueError(
+        "The target must contain exactly two classes."
+    )
+
+target_mapping = {
+    target_values[0]: 0,
+    target_values[1]: 1
+}
+
+y_encoded = y.map(
+    target_mapping
+).astype(int)
+
+print("\nTarget mapping:")
+print(target_mapping)
+
+
+# ============================================================
+# 9. CREATE TWO FEATURE SETS
+# ============================================================
+
+# ------------------------------------------------------------
+# Version A — all features
+# ------------------------------------------------------------
+
+X_with_id = X_original.copy()
+
+X_test_with_id = X_test_original.copy()
+
+
+# ------------------------------------------------------------
+# Version B — remove ID
+# ------------------------------------------------------------
+
+X_without_id = X_original.drop(
+    columns=id_columns,
+    errors="ignore"
+).copy()
+
+X_test_without_id = X_test_original.drop(
+    columns=id_columns,
+    errors="ignore"
+).copy()
+
+
+print("\nFeature counts:")
+print(
+    "With ID   :",
+    X_with_id.shape[1]
+)
+
+print(
+    "Without ID:",
+    X_without_id.shape[1]
+)
+
+
+# ============================================================
+# 10. FUNCTION FOR FEATURE PREPARATION
+# ============================================================
+
+def prepare_features(X, X_test):
+
+    X = X.copy()
+    X_test = X_test.copy()
+
+    # --------------------------------------------------------
+    # Align train and test columns
+    # --------------------------------------------------------
+
+    common_columns = [
+        column
+        for column in X.columns
+        if column in X_test.columns
+    ]
+
+    X = X[common_columns].copy()
+    X_test = X_test[common_columns].copy()
+
+    # --------------------------------------------------------
+    # Identify column types
+    # --------------------------------------------------------
+
+    numeric_columns = X.select_dtypes(
+        include=[
+            "int64",
+            "int32",
+            "float64",
+            "float32",
+            "bool"
+        ]
+    ).columns.tolist()
+
+    categorical_columns = [
+        column
+        for column in X.columns
+        if column not in numeric_columns
+    ]
+
+    # --------------------------------------------------------
+    # Numeric missing values
+    # --------------------------------------------------------
+
+    for column in numeric_columns:
+
+        X[column] = pd.to_numeric(
+            X[column],
+            errors="coerce"
+        )
+
+        X_test[column] = pd.to_numeric(
+            X_test[column],
+            errors="coerce"
+        )
+
+        median_value = X[column].median()
+
+        if pd.isna(median_value):
+            median_value = 0
+
+        X[column] = X[column].fillna(
+            median_value
+        )
+
+        X_test[column] = X_test[column].fillna(
+            median_value
+        )
+
+    # --------------------------------------------------------
+    # Categorical missing values
+    # --------------------------------------------------------
+
+    for column in categorical_columns:
+
+        X[column] = (
+            X[column]
+            .fillna("Missing")
+            .astype(str)
+        )
+
+        X_test[column] = (
+            X_test[column]
+            .fillna("Missing")
+            .astype(str)
+        )
+
+    # --------------------------------------------------------
+    # Encode categorical variables
+    # --------------------------------------------------------
+
+    if len(categorical_columns) > 0:
+
+        encoder = OrdinalEncoder(
+            handle_unknown="use_encoded_value",
+            unknown_value=-1
+        )
+
+        X[categorical_columns] = (
+            encoder.fit_transform(
+                X[categorical_columns]
+            )
+        )
+
+        X_test[categorical_columns] = (
+            encoder.transform(
+                X_test[categorical_columns]
+            )
+        )
+
+    # --------------------------------------------------------
+    # Convert to float32
+    # --------------------------------------------------------
+
+    X = X.astype(np.float32)
+    X_test = X_test.astype(np.float32)
+
+    return X, X_test
+
+
+# ============================================================
+# 11. PREPARE BOTH FEATURE SETS
+# ============================================================
+
+print("\n" + "=" * 70)
+print("PREPARING FEATURES")
+print("=" * 70)
+
+X_with_id, X_test_with_id = prepare_features(
+    X_with_id,
+    X_test_with_id
+)
+
+X_without_id, X_test_without_id = prepare_features(
+    X_without_id,
+    X_test_without_id
+)
+
+print(
+    "\nWith ID feature shape:",
+    X_with_id.shape
+)
+
+print(
+    "Without ID feature shape:",
+    X_without_id.shape
+)
+
+
+# ============================================================
+# 12. SAME VALIDATION INDICES FOR EVERY MODEL
+# ============================================================
+
+print("\n" + "=" * 70)
+print("CREATING CONSISTENT VALIDATION SPLIT")
+print("=" * 70)
+
+train_indices, valid_indices = train_test_split(
+    np.arange(len(y_encoded)),
+    test_size=0.20,
+    random_state=RANDOM_STATE,
+    stratify=y_encoded
+)
+
+print(
+    f"Training rows  : {len(train_indices):,}"
+)
+
+print(
+    f"Validation rows: {len(valid_indices):,}"
+)
+
+
+# ============================================================
+# 13. CLASS IMBALANCE
+# ============================================================
+
+y_train = y_encoded.iloc[train_indices]
+
+negative_count = int(
+    (y_train == 0).sum()
+)
+
+positive_count = int(
+    (y_train == 1).sum()
+)
+
+scale_pos_weight = (
+    negative_count / positive_count
+)
+
+print("\nClass 0:", negative_count)
+print("Class 1:", positive_count)
+
+print(
+    "Scale positive weight:",
+    round(scale_pos_weight, 4)
+)
+
+
+# ============================================================
+# 14. STAGE 7 BENCHMARK
+# ============================================================
+
+STAGE7_ACCURACY = 0.858360
+STAGE7_PRECISION = 0.558529
+STAGE7_RECALL = 0.901738
+STAGE7_F1 = 0.689801
+STAGE7_ROC_AUC = 0.940774
+
+print("\n" + "=" * 70)
+print("STAGE 7 BENCHMARK")
+print("=" * 70)
+
+print(
+    f"Accuracy : {STAGE7_ACCURACY:.6f}"
+)
+
+print(
+    f"Precision: {STAGE7_PRECISION:.6f}"
+)
+
+print(
+    f"Recall   : {STAGE7_RECALL:.6f}"
+)
+
+print(
+    f"F1 Score : {STAGE7_F1:.6f}"
+)
+
+print(
+    f"ROC-AUC  : {STAGE7_ROC_AUC:.6f}"
+)
+
+
+# ============================================================
+# 15. MODEL CONFIGURATIONS
+# ============================================================
+
+models_to_test = [
+
+    {
+        "name": "Baseline_No_ID",
+        "features": "without_id",
+        "n_estimators": 500,
+        "max_depth": 8,
+        "learning_rate": 0.05,
+        "subsample": 0.85,
+        "colsample_bytree": 0.85,
+        "min_child_weight": 3,
+        "gamma": 0,
+        "reg_alpha": 0.05,
+        "reg_lambda": 1.0
+    },
+
+    {
+        "name": "Tuned_No_ID",
+        "features": "without_id",
+        "n_estimators": 650,
+        "max_depth": 7,
+        "learning_rate": 0.04,
+        "subsample": 0.90,
+        "colsample_bytree": 0.90,
+        "min_child_weight": 3,
+        "gamma": 0.05,
+        "reg_alpha": 0.10,
+        "reg_lambda": 1.50
+    },
+
+    {
+        "name": "Regularized_No_ID",
+        "features": "without_id",
+        "n_estimators": 700,
+        "max_depth": 6,
+        "learning_rate": 0.04,
+        "subsample": 0.90,
+        "colsample_bytree": 0.90,
+        "min_child_weight": 5,
+        "gamma": 0.10,
+        "reg_alpha": 0.15,
+        "reg_lambda": 2.00
+    },
+
+    {
+        "name": "Tuned_With_ID",
+        "features": "with_id",
+        "n_estimators": 650,
+        "max_depth": 7,
+        "learning_rate": 0.04,
+        "subsample": 0.90,
+        "colsample_bytree": 0.90,
+        "min_child_weight": 3,
+        "gamma": 0.05,
+        "reg_alpha": 0.10,
+        "reg_lambda": 1.50
+    }
+]
+
+
+# ============================================================
+# 16. TRAIN AND EVALUATE MODELS
+# ============================================================
+
+results = []
+
+trained_models = {}
+
+
+for config in models_to_test:
+
+    print("\n" + "=" * 70)
+
+    print(
+        "TESTING MODEL:",
+        config["name"]
+    )
+
+    print("=" * 70)
+
+    # --------------------------------------------------------
+    # Select features
+    # --------------------------------------------------------
+
+    if config["features"] == "with_id":
+
+        X_current = X_with_id
+
+    else:
+
+        X_current = X_without_id
+
+    X_train_current = X_current.iloc[
+        train_indices
+    ]
+
+    X_valid_current = X_current.iloc[
+        valid_indices
+    ]
+
+    y_train_current = y_encoded.iloc[
+        train_indices
+    ]
+
+    y_valid_current = y_encoded.iloc[
+        valid_indices
+    ]
+
+    # --------------------------------------------------------
+    # Create model
+    # --------------------------------------------------------
+
+    current_model = XGBClassifier(
+
+        n_estimators=config["n_estimators"],
+
+        max_depth=config["max_depth"],
+
+        learning_rate=config["learning_rate"],
+
+        subsample=config["subsample"],
+
+        colsample_bytree=config[
+            "colsample_bytree"
+        ],
+
+        min_child_weight=config[
+            "min_child_weight"
+        ],
+
+        gamma=config["gamma"],
+
+        reg_alpha=config["reg_alpha"],
+
+        reg_lambda=config["reg_lambda"],
+
+        objective="binary:logistic",
+
+        eval_metric="logloss",
+
+        tree_method="hist",
+
+        n_jobs=-1,
+
+        random_state=RANDOM_STATE,
+
+        scale_pos_weight=scale_pos_weight
+    )
+
+    # --------------------------------------------------------
+    # Train
+    # --------------------------------------------------------
+
+    current_model.fit(
+        X_train_current,
+        y_train_current,
+        eval_set=[
+            (
+                X_valid_current,
+                y_valid_current
+            )
+        ],
+        verbose=False
+    )
+
+    # --------------------------------------------------------
+    # Predictions
+    # --------------------------------------------------------
+
+    probabilities = current_model.predict_proba(
+        X_valid_current
+    )[:, 1]
+
+    predictions = (
+        probabilities >= 0.50
+    ).astype(int)
+
+    # --------------------------------------------------------
+    # Metrics
+    # --------------------------------------------------------
+
+    current_accuracy = accuracy_score(
+        y_valid_current,
+        predictions
+    )
+
+    current_precision = precision_score(
+        y_valid_current,
+        predictions,
+        zero_division=0
+    )
+
+    current_recall = recall_score(
+        y_valid_current,
+        predictions,
+        zero_division=0
+    )
+
+    current_f1 = f1_score(
+        y_valid_current,
+        predictions,
+        zero_division=0
+    )
+
+    current_auc = roc_auc_score(
+        y_valid_current,
+        probabilities
+    )
+
+    # --------------------------------------------------------
+    # Store results
+    # --------------------------------------------------------
+
+    results.append({
+
+        "Model": config["name"],
+
+        "Features": config["features"],
+
+        "Accuracy": current_accuracy,
+
+        "Precision": current_precision,
+
+        "Recall": current_recall,
+
+        "F1": current_f1,
+
+        "ROC_AUC": current_auc
+
+    })
+
+    trained_models[
+        config["name"]
+    ] = current_model
+
+    # --------------------------------------------------------
+    # Print results
+    # --------------------------------------------------------
+
+    print(
+        f"\nAccuracy : {current_accuracy:.6f}"
+    )
+
+    print(
+        f"Precision: {current_precision:.6f}"
+    )
+
+    print(
+        f"Recall   : {current_recall:.6f}"
+    )
+
+    print(
+        f"F1 Score : {current_f1:.6f}"
+    )
+
+    print(
+        f"ROC-AUC  : {current_auc:.6f}"
+    )
+
+
+# ============================================================
+# 17. MODEL COMPARISON
+# ============================================================
+
+results_df = pd.DataFrame(results)
+
+results_df = results_df.sort_values(
+    by="ROC_AUC",
+    ascending=False
+).reset_index(drop=True)
+
+
+print("\n" + "=" * 70)
+print("MODEL COMPARISON")
+print("=" * 70)
+
+print(
+    results_df.to_string(
+        index=False,
+        float_format=lambda x: f"{x:.6f}"
+    )
+)
+
+
+# ============================================================
+# 18. COMPARE AGAINST STAGE 7
+# ============================================================
+
+print("\n" + "=" * 70)
+print("COMPARISON AGAINST STAGE 7")
+print("=" * 70)
+
+best_model_name = results_df.iloc[0]["Model"]
+
+best_auc = results_df.iloc[0]["ROC_AUC"]
+
+best_accuracy = results_df.iloc[0]["Accuracy"]
+
+best_precision = results_df.iloc[0]["Precision"]
+
+best_recall = results_df.iloc[0]["Recall"]
+
+best_f1 = results_df.iloc[0]["F1"]
+
+
+print(
+    "\nBest Stage 8 model:",
+    best_model_name
+)
+
+print(
+    f"\nStage 7 ROC-AUC : "
+    f"{STAGE7_ROC_AUC:.6f}"
+)
+
+print(
+    f"Stage 8 ROC-AUC : "
+    f"{best_auc:.6f}"
+)
+
+print(
+    f"Difference      : "
+    f"{best_auc - STAGE7_ROC_AUC:+.6f}"
+)
+
+
+print(
+    f"\nStage 7 Accuracy: "
+    f"{STAGE7_ACCURACY:.6f}"
+)
+
+print(
+    f"Stage 8 Accuracy: "
+    f"{best_accuracy:.6f}"
+)
+
+
+# ============================================================
+# 19. BEST MODEL DETAILED EVALUATION
+# ============================================================
+
+best_model = trained_models[
+    best_model_name
+]
+
+if (
+    results_df.iloc[0]["Features"]
+    == "with_id"
+):
+
+    best_X = X_with_id
+
+else:
+
+    best_X = X_without_id
+
+
+best_X_valid = best_X.iloc[
+    valid_indices
+]
+
+best_y_valid = y_encoded.iloc[
+    valid_indices
+]
+
+best_probabilities = best_model.predict_proba(
+    best_X_valid
+)[:, 1]
+
+best_predictions = (
+    best_probabilities >= 0.50
+).astype(int)
+
+
+print("\n" + "=" * 70)
+print("BEST MODEL DETAILED EVALUATION")
+print("=" * 70)
+
+print("\nClassification Report:")
+
+print(
+    classification_report(
+        best_y_valid,
+        best_predictions,
+        zero_division=0
+    )
+)
+
+print("\nConfusion Matrix:")
+
+print(
+    confusion_matrix(
+        best_y_valid,
+        best_predictions
+    )
+)
+
+
+# ============================================================
+# 20. FEATURE IMPORTANCE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("BEST MODEL FEATURE IMPORTANCE")
+print("=" * 70)
+
+importance_df = pd.DataFrame({
+
+    "Feature": best_X.columns,
+
+    "Importance": best_model.feature_importances_
+
+})
+
+importance_df = importance_df.sort_values(
+    by="Importance",
+    ascending=False
+)
+
+print(
+    importance_df.head(20).to_string(
+        index=False
+    )
+)
+
+
+# ============================================================
+# 21. SAVE STAGE 8 RESULTS
+# ============================================================
+
+results_df.to_csv(
+    "stage8_model_comparison.csv",
+    index=False
+)
+
+importance_df.to_csv(
+    "stage8_feature_importance.csv",
+    index=False
+)
+
+
+# ============================================================
+# 22. FINAL SUMMARY
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 8 COMPLETE")
+print("=" * 70)
+
+print(
+    "\nBest model:",
+    best_model_name
+)
+
+print(
+    f"Best ROC-AUC : {best_auc:.6f}"
+)
+
+print(
+    f"Best Accuracy: {best_accuracy:.6f}"
+)
+
+print(
+    f"Best Precision: {best_precision:.6f}"
+)
+
+print(
+    f"Best Recall: {best_recall:.6f}"
+)
+
+print(
+    f"Best F1: {best_f1:.6f}"
+)
+
+print(
+    "\nFiles created:"
+)
+
+print(
+    " - stage8_model_comparison.csv"
+)
+
+print(
+    " - stage8_feature_importance.csv"
+)
+
+print("\nDo NOT create the final submission yet.")
+
+print(
+    "Use the Stage 8 results to determine the final model "
+    "configuration for Stage 9."
+)
+
+print("=" * 70)
