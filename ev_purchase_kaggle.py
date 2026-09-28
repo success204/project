@@ -3278,3 +3278,556 @@ print(
 print(
     " - submission_stage6_xgboost.csv"
 )
+
+
+# ============================================================
+# STAGE 7 — FINAL XGBOOST MODEL & KAGGLE SUBMISSION
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 7 — FINAL XGBOOST MODEL & KAGGLE SUBMISSION")
+print("=" * 70)
+
+
+# ============================================================
+# 1. IMPORTS
+# ============================================================
+
+import numpy as np
+import pandas as pd
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import OrdinalEncoder
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    confusion_matrix,
+    classification_report
+)
+
+from xgboost import XGBClassifier
+
+
+# ============================================================
+# 2. FILE NAMES
+# ============================================================
+
+TRAIN_FILE = "train.csv"
+TEST_FILE = "test.csv"
+
+TARGET = "Will_Buy_EV"
+
+
+# ============================================================
+# 3. LOAD DATA
+# ============================================================
+
+print("\n" + "=" * 70)
+print("LOADING DATA")
+print("=" * 70)
+
+train_data = pd.read_csv(TRAIN_FILE)
+test_data = pd.read_csv(TEST_FILE)
+
+print(f"Train shape: {train_data.shape}")
+print(f"Test shape : {test_data.shape}")
+
+
+# ============================================================
+# 4. CHECK TARGET
+# ============================================================
+
+if TARGET not in train_data.columns:
+    raise ValueError(
+        f"'{TARGET}' was not found in the training dataset."
+    )
+
+print("\nTarget distribution:")
+print(train_data[TARGET].value_counts())
+
+
+# ============================================================
+# 5. SEPARATE FEATURES AND TARGET
+# ============================================================
+
+X = train_data.drop(columns=[TARGET]).copy()
+y = train_data[TARGET].copy()
+
+X_test = test_data.copy()
+
+
+# ============================================================
+# 6. REMOVE UNNECESSARY INDEX COLUMNS
+# ============================================================
+
+columns_to_remove = []
+
+for column in X.columns:
+
+    if str(column).lower().startswith("unnamed:"):
+        columns_to_remove.append(column)
+
+if columns_to_remove:
+
+    X = X.drop(columns=columns_to_remove)
+
+    X_test = X_test.drop(
+        columns=[
+            column
+            for column in columns_to_remove
+            if column in X_test.columns
+        ]
+    )
+
+
+# ============================================================
+# 7. MAKE TRAIN AND TEST COLUMNS MATCH
+# ============================================================
+
+common_columns = [
+    column
+    for column in X.columns
+    if column in X_test.columns
+]
+
+X = X[common_columns]
+X_test = X_test[common_columns]
+
+print("\nNumber of features:", len(common_columns))
+
+
+# ============================================================
+# 8. IDENTIFY NUMERIC AND CATEGORICAL COLUMNS
+# ============================================================
+
+numeric_columns = X.select_dtypes(
+    include=["int64", "int32", "float64", "float32", "bool"]
+).columns.tolist()
+
+categorical_columns = [
+    column
+    for column in X.columns
+    if column not in numeric_columns
+]
+
+print("Numeric columns    :", len(numeric_columns))
+print("Categorical columns:", len(categorical_columns))
+
+
+# ============================================================
+# 9. HANDLE NUMERIC MISSING VALUES
+# ============================================================
+
+for column in numeric_columns:
+
+    X[column] = pd.to_numeric(
+        X[column],
+        errors="coerce"
+    )
+
+    X_test[column] = pd.to_numeric(
+        X_test[column],
+        errors="coerce"
+    )
+
+    median_value = X[column].median()
+
+    X[column] = X[column].fillna(median_value)
+    X_test[column] = X_test[column].fillna(median_value)
+
+
+# ============================================================
+# 10. HANDLE CATEGORICAL COLUMNS
+# ============================================================
+
+for column in categorical_columns:
+
+    X[column] = X[column].fillna("Missing").astype(str)
+    X_test[column] = X_test[column].fillna("Missing").astype(str)
+
+
+# ============================================================
+# 11. ENCODE CATEGORICAL FEATURES
+# ============================================================
+
+if len(categorical_columns) > 0:
+
+    encoder = OrdinalEncoder(
+        handle_unknown="use_encoded_value",
+        unknown_value=-1
+    )
+
+    X[categorical_columns] = encoder.fit_transform(
+        X[categorical_columns]
+    )
+
+    X_test[categorical_columns] = encoder.transform(
+        X_test[categorical_columns]
+    )
+
+
+# ============================================================
+# 12. CONVERT FEATURES TO FLOAT32
+# ============================================================
+
+X = X.astype(np.float32)
+X_test = X_test.astype(np.float32)
+
+
+# ============================================================
+# 13. ENCODE TARGET
+# ============================================================
+
+target_values = sorted(
+    y.unique()
+)
+
+if len(target_values) != 2:
+    raise ValueError(
+        "Will_Buy_EV must contain exactly two classes."
+    )
+
+target_mapping = {
+    target_values[0]: 0,
+    target_values[1]: 1
+}
+
+y_encoded = y.map(target_mapping).astype(int)
+
+print("\nTarget mapping:")
+print(target_mapping)
+
+
+# ============================================================
+# 14. TRAIN / VALIDATION SPLIT
+# ============================================================
+
+print("\n" + "=" * 70)
+print("CREATING VALIDATION SET")
+print("=" * 70)
+
+X_train, X_valid, y_train, y_valid = train_test_split(
+    X,
+    y_encoded,
+    test_size=0.20,
+    random_state=42,
+    stratify=y_encoded
+)
+
+print("Training rows  :", len(X_train))
+print("Validation rows:", len(X_valid))
+
+
+# ============================================================
+# 15. HANDLE CLASS IMBALANCE
+# ============================================================
+
+negative_count = (y_train == 0).sum()
+positive_count = (y_train == 1).sum()
+
+scale_pos_weight = (
+    negative_count / positive_count
+)
+
+print("\nClass 0:", negative_count)
+print("Class 1:", positive_count)
+print(
+    "Scale positive weight:",
+    round(scale_pos_weight, 4)
+)
+
+
+# ============================================================
+# 16. TRAIN XGBOOST
+# ============================================================
+
+print("\n" + "=" * 70)
+print("TRAINING XGBOOST")
+print("=" * 70)
+
+model = XGBClassifier(
+    n_estimators=500,
+    max_depth=8,
+    learning_rate=0.05,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    min_child_weight=3,
+    reg_alpha=0.05,
+    reg_lambda=1.0,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    tree_method="hist",
+    n_jobs=-1,
+    random_state=42,
+    scale_pos_weight=scale_pos_weight
+)
+
+model.fit(
+    X_train,
+    y_train,
+    eval_set=[(X_valid, y_valid)],
+    verbose=False
+)
+
+print("XGBoost training completed.")
+
+
+# ============================================================
+# 17. VALIDATION PREDICTIONS
+# ============================================================
+
+validation_probabilities = model.predict_proba(
+    X_valid
+)[:, 1]
+
+validation_predictions = (
+    validation_probabilities >= 0.50
+).astype(int)
+
+
+# ============================================================
+# 18. EVALUATION
+# ============================================================
+
+accuracy = accuracy_score(
+    y_valid,
+    validation_predictions
+)
+
+precision = precision_score(
+    y_valid,
+    validation_predictions,
+    zero_division=0
+)
+
+recall = recall_score(
+    y_valid,
+    validation_predictions,
+    zero_division=0
+)
+
+f1 = f1_score(
+    y_valid,
+    validation_predictions,
+    zero_division=0
+)
+
+roc_auc = roc_auc_score(
+    y_valid,
+    validation_probabilities
+)
+
+
+print("\n" + "=" * 70)
+print("VALIDATION RESULTS")
+print("=" * 70)
+
+print(f"Accuracy : {accuracy:.6f}")
+print(f"Precision: {precision:.6f}")
+print(f"Recall   : {recall:.6f}")
+print(f"F1 Score : {f1:.6f}")
+print(f"ROC-AUC  : {roc_auc:.6f}")
+
+
+# ============================================================
+# 19. CLASSIFICATION REPORT
+# ============================================================
+
+print("\nClassification Report:")
+print(
+    classification_report(
+        y_valid,
+        validation_predictions,
+        zero_division=0
+    )
+)
+
+
+# ============================================================
+# 20. CONFUSION MATRIX
+# ============================================================
+
+print("\nConfusion Matrix:")
+print(
+    confusion_matrix(
+        y_valid,
+        validation_predictions
+    )
+)
+
+
+# ============================================================
+# 21. FEATURE IMPORTANCE
+# ============================================================
+
+print("\n" + "=" * 70)
+print("TOP 20 FEATURE IMPORTANCE")
+print("=" * 70)
+
+importance_df = pd.DataFrame({
+    "Feature": X.columns,
+    "Importance": model.feature_importances_
+})
+
+importance_df = importance_df.sort_values(
+    by="Importance",
+    ascending=False
+)
+
+print(
+    importance_df.head(20).to_string(
+        index=False
+    )
+)
+
+
+# ============================================================
+# 22. RETRAIN ON FULL TRAINING DATA
+# ============================================================
+
+print("\n" + "=" * 70)
+print("TRAINING FINAL MODEL ON FULL DATA")
+print("=" * 70)
+
+final_model = XGBClassifier(
+    n_estimators=500,
+    max_depth=8,
+    learning_rate=0.05,
+    subsample=0.85,
+    colsample_bytree=0.85,
+    min_child_weight=3,
+    reg_alpha=0.05,
+    reg_lambda=1.0,
+    objective="binary:logistic",
+    eval_metric="logloss",
+    tree_method="hist",
+    n_jobs=-1,
+    random_state=42,
+    scale_pos_weight=scale_pos_weight
+)
+
+final_model.fit(
+    X,
+    y_encoded,
+    verbose=False
+)
+
+print("Final model trained.")
+
+
+# ============================================================
+# 23. PREDICT TEST DATA
+# ============================================================
+
+print("\n" + "=" * 70)
+print("CREATING TEST PREDICTIONS")
+print("=" * 70)
+
+test_probabilities = final_model.predict_proba(
+    X_test
+)[:, 1]
+
+test_predictions_encoded = (
+    test_probabilities >= 0.50
+).astype(int)
+
+
+# ============================================================
+# 24. CONVERT BACK TO ORIGINAL TARGET VALUES
+# ============================================================
+
+reverse_mapping = {
+    0: target_values[0],
+    1: target_values[1]
+}
+
+test_predictions = pd.Series(
+    test_predictions_encoded
+).map(reverse_mapping)
+
+
+# ============================================================
+# 25. CREATE SUBMISSION
+# ============================================================
+
+submission = pd.DataFrame({
+    TARGET: test_predictions
+})
+
+
+# ============================================================
+# 26. CHECK SUBMISSION
+# ============================================================
+
+print("\nSubmission shape:", submission.shape)
+
+print("\nPrediction distribution:")
+print(
+    submission[TARGET].value_counts()
+)
+
+print(
+    "\nMissing predictions:",
+    submission[TARGET].isna().sum()
+)
+
+if len(submission) != len(test_data):
+    raise ValueError(
+        "Submission row count does not match test data."
+    )
+
+if submission[TARGET].isna().any():
+    raise ValueError(
+        "Submission contains missing predictions."
+    )
+
+
+# ============================================================
+# 27. SAVE SUBMISSION
+# ============================================================
+
+submission_file = "submission_stage7.csv"
+
+submission.to_csv(
+    submission_file,
+    index=False
+)
+
+print(
+    f"\nSubmission saved successfully as: "
+    f"{submission_file}"
+)
+
+
+# ============================================================
+# 28. SHOW FIRST 10 PREDICTIONS
+# ============================================================
+
+print("\nFirst 10 predictions:")
+print(
+    submission.head(10)
+)
+
+
+# ============================================================
+# 29. STAGE 7 SUMMARY
+# ============================================================
+
+print("\n" + "=" * 70)
+print("STAGE 7 COMPLETE")
+print("=" * 70)
+
+print(f"Validation Accuracy : {accuracy:.6f}")
+print(f"Validation Precision: {precision:.6f}")
+print(f"Validation Recall   : {recall:.6f}")
+print(f"Validation F1       : {f1:.6f}")
+print(f"Validation ROC-AUC  : {roc_auc:.6f}")
+
+print(
+    f"\nSubmission file: {submission_file}"
+)
+
+print("=" * 70)
